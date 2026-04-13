@@ -382,7 +382,10 @@ def ppo_loss(
         loss  = -torch.min(surr1, surr2).mean()
     """
     # -- YOUR CODE HERE --
-    raise NotImplementedError("TODO 4: implement the clipped surrogate objective")
+    ratio = (new_log_probs - old_log_probs).exp()
+    surr1 = ratio * advantages
+    surr2 = ratio.clamp(1.0 - clip_eps, 1.0 + clip_eps) * advantages
+    return -torch.min(surr1, surr2).mean()
     # -- END YOUR CODE --
 
 
