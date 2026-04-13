@@ -300,7 +300,15 @@ def sample_action(
     only the returned action keeps the gradient honest.
     """
     # -- YOUR CODE HERE --
-    raise NotImplementedError("TODO 2: sample an action from the policy")
+    mean = actor(obs)
+    dist = Normal(mean, log_std.exp())
+    if deterministic:
+        unclipped = mean
+    else:
+        unclipped = dist.sample()
+    log_prob = dist.log_prob(unclipped).sum(dim=-1)
+    action = unclipped.clamp(-1.0, 1.0)
+    return action, log_prob
     # -- END YOUR CODE --
 
 
