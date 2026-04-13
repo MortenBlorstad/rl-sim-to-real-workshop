@@ -188,9 +188,10 @@ def train(
 **Script-mode invariants** (FR-026 / FR-027): when run from `if __name__ == "__main__":` on `MountainCarContinuous-v0` with the defaults from research R3:
 
 - The function prints exactly `n_updates` lines (8 by default).
-- No printed `policy_loss` or `value_loss` value is `nan`.
-- The last printed `policy_loss` is strictly less than the first printed `policy_loss`.
-- The training run completes in roughly 1–3 minutes on a standard laptop CPU.
+- No printed `policy_loss` value is `nan`.
+- No printed `entropy` value is `nan`.
+- The last printed `entropy` is strictly less than the first printed `entropy`. (NOT `policy_loss` — PPO's clipped surrogate loss is not supervised and is not expected to decrease monotonically.)
+- The training run completes in roughly 1–3 minutes on a standard laptop CPU. In practice it is much faster on modern CPUs (~2–3 seconds for the 8-update default budget).
 
 ---
 

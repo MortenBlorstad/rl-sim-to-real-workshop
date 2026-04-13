@@ -590,6 +590,7 @@ def _main() -> int:
     log_std = nn.Parameter(torch.zeros(action_dim))
 
     captured_policy_losses: list[float] = []
+    captured_entropies: list[float] = []
 
     def _capturing_log(line: str) -> None:
         print(line)
@@ -599,7 +600,11 @@ def _main() -> int:
                     captured_policy_losses.append(float(token.split("=", 1)[1]))
                 except ValueError:
                     pass
-                return
+            elif token.startswith("entropy="):
+                try:
+                    captured_entropies.append(float(token.split("=", 1)[1]))
+                except ValueError:
+                    pass
 
     try:
         train(
@@ -615,7 +620,13 @@ def _main() -> int:
         print(f"\nFAIL: TODO not yet implemented — {exc}", file=sys.stderr)
         return 1
 
-    # FR-027 — exit-time invariants on the printed losses.
+    # FR-027 — exit-time invariants on the printed metrics.
+    #
+    # We check entropy (NOT policy_loss) for the trend. PPO's clipped
+    # surrogate loss is not a supervised loss — it bounces around as the
+    # policy improves and is not expected to decrease monotonically. The
+    # canonical monotonic signal in PPO is policy entropy: as the agent
+    # commits to better actions, entropy goes DOWN.
     if not captured_policy_losses:
         print(
             "FAIL: training loop printed no policy_loss lines. "
@@ -630,19 +641,34 @@ def _main() -> int:
             file=sys.stderr,
         )
         return 1
-    if captured_policy_losses[-1] >= captured_policy_losses[0]:
+    if not captured_entropies:
         print(
-            f"FAIL: policy_loss did not trend down "
-            f"(first={captured_policy_losses[0]:+.4f}, "
-            f"last={captured_policy_losses[-1]:+.4f}).",
+            "FAIL: training loop printed no entropy values. "
+            "Did you call format_update_line(...) inside train()?",
+            file=sys.stderr,
+        )
+        return 1
+    if any(math.isnan(e) for e in captured_entropies):
+        print(
+            f"FAIL: at least one printed entropy is NaN "
+            f"(saw {captured_entropies}).",
+            file=sys.stderr,
+        )
+        return 1
+    if captured_entropies[-1] >= captured_entropies[0]:
+        print(
+            f"FAIL: entropy did not trend down "
+            f"(first={captured_entropies[0]:+.4f}, "
+            f"last={captured_entropies[-1]:+.4f}). "
+            f"Entropy should decrease as the policy commits to actions.",
             file=sys.stderr,
         )
         return 1
 
     print(
-        f"\n✓ Training complete: loss trending down "
-        f"({captured_policy_losses[0]:+.4f} → "
-        f"{captured_policy_losses[-1]:+.4f}), no NaN losses."
+        f"\n✓ Training complete: entropy trending down "
+        f"({captured_entropies[0]:+.4f} → {captured_entropies[-1]:+.4f}), "
+        f"no NaN losses."
     )
     return 0
 
