@@ -253,7 +253,15 @@ def compute_gae(
     is what cuts the bootstrap at episode boundaries.
     """
     # -- YOUR CODE HERE --
-    raise NotImplementedError("TODO 1: compute generalized advantage estimation")
+    T = rewards.shape[0]
+    advantages = torch.zeros(T, dtype=rewards.dtype)
+    gae = 0.0
+    for t in reversed(range(T)):
+        not_done = 1.0 - float(dones[t])
+        delta = rewards[t] + gamma * values[t + 1] * not_done - values[t]
+        gae = float(delta) + gamma * lam * not_done * gae
+        advantages[t] = gae
+    return advantages
     # -- END YOUR CODE --
 
 
