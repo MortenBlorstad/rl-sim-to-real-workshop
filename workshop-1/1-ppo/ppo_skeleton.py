@@ -341,7 +341,11 @@ def evaluate_actions(
         4. entropy   = dist.entropy().sum(dim=-1)
     """
     # -- YOUR CODE HERE --
-    raise NotImplementedError("TODO 3: compute log_prob and entropy of actions")
+    mean = actor(obs)
+    dist = Normal(mean, log_std.exp())
+    log_probs = dist.log_prob(actions).sum(dim=-1)
+    entropy = dist.entropy().sum(dim=-1)
+    return log_probs, entropy
     # -- END YOUR CODE --
 
 
