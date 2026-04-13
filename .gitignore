@@ -1,0 +1,45 @@
+# Workshop/session-local tooling — not part of the curriculum
+.claude/
+.specify/
+claude.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Training outputs (Article IX)
+logs/
+runs/
+tb_logs/
+wandb/
+*.pt
+*.pth
+*.ckpt
+
+# Large artifacts — use Git LFS or external hosting
+*.zip
+*.tar.gz
+
+# DonkeyCar simulator binaries
+DonkeySim*/
+donkey_sim*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo

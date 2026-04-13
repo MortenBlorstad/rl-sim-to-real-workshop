@@ -1,0 +1,24 @@
+[project]
+name = "rl-sim-to-real-workshop"
+version = "0.1.0"
+description = "Reinforcement Learning Workshop: Sim-to-Real med PiRacer Pro"
+requires-python = ">=3.10,<3.13"
+dependencies = []
+
+[dependency-groups]
+workshop1 = [
+    "gymnasium[all]",
+    "torch",
+    "numpy",
+    "matplotlib",
+    "stable-baselines3",
+    "tensorboard",
+]
+workshop2 = [
+    "gym-donkeycar",
+    "stable-baselines3",
+    "torch",
+    "numpy",
+    "opencv-python",
+    "Pillow",
+]
