@@ -454,7 +454,107 @@ def train(
         ``__main__`` runner can parse loss values for its exit checks.
     """
     # -- YOUR CODE HERE --
-    raise NotImplementedError("TODO 5: wire rollout collection together with the update step")
+    # Re-seed for reproducibility within a single train() call.
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    obs_dim = int(np.prod(env.observation_space.shape))
+    action_dim = int(np.prod(env.action_space.shape))
+
+    optimizer = torch.optim.Adam(
+        list(actor.parameters()) + list(value.parameters()) + [log_std],
+        lr=lr,
+    )
+    buffer = RolloutBuffer(rollout_size, obs_dim, action_dim)
+    n_updates = max(1, total_timesteps // rollout_size)
+
+    obs, _ = env.reset(seed=seed)
+    episode_returns: list[float] = []
+    current_return = 0.0
+    timesteps = 0
+    final_stats: dict = {}
+
+    for update_idx in range(1, n_updates + 1):
+        # ----- rollout collection -----
+        last_step_done = False
+        for _ in range(rollout_size):
+            obs_t = torch.as_tensor(obs, dtype=torch.float32)
+            with torch.no_grad():
+                action, log_prob = sample_action(actor, obs_t, log_std)
+                value_t = value(obs_t).item()
+            action_np = action.detach().cpu().numpy().astype(np.float32)
+            next_obs, reward, terminated, truncated, _ = env.step(action_np)
+            done = bool(terminated or truncated)
+            buffer.add(obs, action_np, log_prob.item(), reward, done, value_t)
+            current_return += float(reward)
+            timesteps += 1
+            if done:
+                episode_returns.append(current_return)
+                current_return = 0.0
+                obs, _ = env.reset()
+                last_step_done = True
+            else:
+                obs = next_obs
+                last_step_done = False
+
+        # Bootstrap final value (zero if rollout ended on terminal step).
+        if last_step_done:
+            last_value = 0.0
+        else:
+            with torch.no_grad():
+                last_value = value(torch.as_tensor(obs, dtype=torch.float32)).item()
+
+        buffer.compute_returns_and_advantages(last_value, gamma, gae_lambda)
+
+        # ----- update phase -----
+        last_p_loss = 0.0
+        last_v_loss = 0.0
+        last_entropy = 0.0
+        for _ in range(n_epochs):
+            for batch in buffer.get_batches(batch_size):
+                new_log_probs, ent = evaluate_actions(
+                    actor, batch["obs"], batch["actions"], log_std,
+                )
+                pred_values = value(batch["obs"])
+                p_loss = ppo_loss(
+                    new_log_probs, batch["old_log_probs"], batch["advantages"], clip_eps,
+                )
+                v_loss = F.mse_loss(pred_values, batch["returns"])
+                loss = p_loss + value_coef * v_loss - entropy_coef * ent.mean()
+
+                optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(
+                    list(actor.parameters()) + list(value.parameters()) + [log_std],
+                    max_grad_norm,
+                )
+                optimizer.step()
+
+                last_p_loss = float(p_loss.item())
+                last_v_loss = float(v_loss.item())
+                last_entropy = float(ent.mean().item())
+
+        mean_return = (
+            float(np.mean(episode_returns[-10:])) if episode_returns else current_return
+        )
+        log_fn(
+            format_update_line(
+                update_idx, n_updates, timesteps,
+                last_p_loss, last_v_loss, last_entropy, mean_return,
+            )
+        )
+        buffer.reset()
+
+        final_stats = {
+            "mean_reward": mean_return,
+            "policy_loss": last_p_loss,
+            "value_loss": last_v_loss,
+            "entropy": last_entropy,
+            "n_updates": update_idx,
+        }
+
+    return final_stats
     # -- END YOUR CODE --
 
 
@@ -613,6 +713,7 @@ def _main() -> int:
     log_std = nn.Parameter(torch.zeros(action_dim))
 
     captured_policy_losses: list[float] = []
+    captured_entropies: list[float] = []
 
     def _capturing_log(line: str) -> None:
         print(line)
@@ -622,7 +723,11 @@ def _main() -> int:
                     captured_policy_losses.append(float(token.split("=", 1)[1]))
                 except ValueError:
                     pass
-                return
+            elif token.startswith("entropy="):
+                try:
+                    captured_entropies.append(float(token.split("=", 1)[1]))
+                except ValueError:
+                    pass
 
     try:
         train(
@@ -638,7 +743,13 @@ def _main() -> int:
         print(f"\nFAIL: TODO not yet implemented — {exc}", file=sys.stderr)
         return 1
 
-    # FR-027 — exit-time invariants on the printed losses.
+    # FR-027 — exit-time invariants on the printed metrics.
+    #
+    # We check entropy (NOT policy_loss) for the trend. PPO's clipped
+    # surrogate loss is not a supervised loss — it bounces around as the
+    # policy improves and is not expected to decrease monotonically. The
+    # canonical monotonic signal in PPO is policy entropy: as the agent
+    # commits to better actions, entropy goes DOWN.
     if not captured_policy_losses:
         print(
             "FAIL: training loop printed no policy_loss lines. "
@@ -653,19 +764,34 @@ def _main() -> int:
             file=sys.stderr,
         )
         return 1
-    if captured_policy_losses[-1] >= captured_policy_losses[0]:
+    if not captured_entropies:
         print(
-            f"FAIL: policy_loss did not trend down "
-            f"(first={captured_policy_losses[0]:+.4f}, "
-            f"last={captured_policy_losses[-1]:+.4f}).",
+            "FAIL: training loop printed no entropy values. "
+            "Did you call format_update_line(...) inside train()?",
+            file=sys.stderr,
+        )
+        return 1
+    if any(math.isnan(e) for e in captured_entropies):
+        print(
+            f"FAIL: at least one printed entropy is NaN "
+            f"(saw {captured_entropies}).",
+            file=sys.stderr,
+        )
+        return 1
+    if captured_entropies[-1] >= captured_entropies[0]:
+        print(
+            f"FAIL: entropy did not trend down "
+            f"(first={captured_entropies[0]:+.4f}, "
+            f"last={captured_entropies[-1]:+.4f}). "
+            f"Entropy should decrease as the policy commits to actions.",
             file=sys.stderr,
         )
         return 1
 
     print(
-        f"\n✓ Training complete: loss trending down "
-        f"({captured_policy_losses[0]:+.4f} → "
-        f"{captured_policy_losses[-1]:+.4f}), no NaN losses."
+        f"\n✓ Training complete: entropy trending down "
+        f"({captured_entropies[0]:+.4f} → {captured_entropies[-1]:+.4f}), "
+        f"no NaN losses."
     )
     return 0
 
