@@ -91,7 +91,7 @@ You should see a CartPole window with a pole falling left and right. If it works
 ├── workshop-1/                  # Day 1: RL theory + PPO + Gymnasium
 │   ├── 0-warmup/                # Verify that the env works
 │   ├── 1-ppo/                   # Implement PPO via TODOs
-│   ├── 2-cartpole/              # Apply PPO to CartPole
+│   ├── 2-mountaincar/           # Apply PPO to MountainCar
 │   └── 3-car-racing/            # Apply PPO to CarRacing
 │
 ├── workshop-2/                  # Day 2: DonkeyCar sim + real car
