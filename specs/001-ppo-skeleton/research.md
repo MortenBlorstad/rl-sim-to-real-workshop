@@ -167,12 +167,13 @@ This overwrites only the participant's `ppo_skeleton.py` with the version where 
 [update  1/8] timesteps=  1024  policy_loss=+0.123  value_loss=+0.456  entropy=+0.789  mean_return=-32.10
 ```
 
-No tensorboard, no matplotlib, no JSON, no log file. The `train()` function returns a dict containing the final values of these stats (used by the smoke test in FR-024).
+No tensorboard, no matplotlib, no JSON, no log file. The `train()` function returns a dict containing the final values of these stats (used by the smoke test in FR-024). The script-mode FR-027 exit check parses `entropy=...` from each printed line and asserts the **entropy** trend is monotonically downward (not `policy_loss` — PPO's clipped surrogate loss is not supervised and bounces around as the policy improves).
 
 **Rationale**:
 - Console-only is the lowest-friction output for beginners and works on any laptop with no extra setup.
-- One line per update means the FR-027 trend check is just `last_loss < first_loss` over the printed lines, easy for participants to eyeball.
+- One line per update means the FR-027 trend check is just `last_entropy < first_entropy` over the printed lines, easy for participants to eyeball.
 - Returning a stats dict from `train()` lets the smoke test verify the training loop's "shape" without re-parsing stdout.
+- The metric chosen for the trend check is **entropy**, not `policy_loss`. PPO's clipped surrogate is not expected to decrease monotonically — it bounces around as the policy improves and the clip kicks in. Entropy, by contrast, decreases monotonically as the policy commits to better actions, so it is the right signal for "is training actually progressing".
 
 **Alternatives considered**:
 - *tensorboard*: adds a dependency, requires a separate viewer, overkill for stage 1.

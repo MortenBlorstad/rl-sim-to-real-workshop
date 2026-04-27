@@ -70,4 +70,27 @@ Tasks:
 
 - Ask the person next to you
 - Ask the workshop leader
-- Check the `solutions` branch: `git checkout solutions -- workshop-1/1-ppo/ppo_complete.py`
+- Recover one specific TODO from the per-step solution checkpoints (see below)
+
+### Per-TODO recovery checkpoints
+
+Each TODO has its own git tag on the `solutions` branch. The tag points
+at a state where TODOs `1..N` are solved and TODOs `N+1..5` still raise
+`NotImplementedError`. To jump past TODO `N`, run:
+
+```bash
+git checkout ws1-todoN-done -- workshop-1/1-ppo/ppo_skeleton.py
+```
+
+Replace `N` with `1`, `2`, `3`, `4`, or `5`. For example, to recover TODO 3:
+
+```bash
+git checkout ws1-todo3-done -- workshop-1/1-ppo/ppo_skeleton.py
+uv run python workshop-1/1-ppo/test_ppo.py
+# TODOs 1-3: PASS, TODOs 4-5: NOT_IMPLEMENTED
+```
+
+> ⚠️ **Commit your work first.** This is a path-scoped checkout — it
+> overwrites your local copy of `ppo_skeleton.py`. Anything you had
+> written for TODOs `N+1..5` will be lost. Run `git add` + `git commit`
+> first if you want to keep that work.

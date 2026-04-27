@@ -89,20 +89,20 @@ uv run python workshop-1/1-ppo/ppo_skeleton.py
 **Expected output** (numbers will vary slightly):
 
 ```text
-[update  1/8] timesteps=  1024  policy_loss=+0.142  value_loss=+0.531  entropy=+1.418  mean_return=-31.84
-[update  2/8] timesteps=  2048  policy_loss=+0.118  value_loss=+0.487  entropy=+1.402  mean_return=-30.12
-[update  3/8] timesteps=  3072  policy_loss=+0.094  value_loss=+0.421  entropy=+1.388  mean_return=-29.55
-[update  4/8] timesteps=  4096  policy_loss=+0.082  value_loss=+0.376  entropy=+1.371  mean_return=-28.89
-[update  5/8] timesteps=  5120  policy_loss=+0.071  value_loss=+0.338  entropy=+1.359  mean_return=-28.04
-[update  6/8] timesteps=  6144  policy_loss=+0.063  value_loss=+0.305  entropy=+1.346  mean_return=-27.32
-[update  7/8] timesteps=  7168  policy_loss=+0.055  value_loss=+0.279  entropy=+1.334  mean_return=-26.71
-[update  8/8] timesteps=  8192  policy_loss=+0.048  value_loss=+0.254  entropy=+1.322  mean_return=-26.04
-✓ Training complete: loss trending down (0.142 → 0.048), no NaN losses.
+[update  1/8] timesteps=  1024  policy_loss=+0.202  value_loss=+0.050  entropy=+1.402  mean_return=-50.18
+[update  2/8] timesteps=  2048  policy_loss=+0.339  value_loss=+0.103  entropy=+1.386  mean_return=-50.44
+[update  3/8] timesteps=  3072  policy_loss=+0.175  value_loss=+0.099  entropy=+1.373  mean_return=-50.63
+[update  4/8] timesteps=  4096  policy_loss=+0.024  value_loss=+0.030  entropy=+1.356  mean_return=-50.58
+[update  5/8] timesteps=  5120  policy_loss=+0.066  value_loss=+0.077  entropy=+1.343  mean_return=-50.08
+[update  6/8] timesteps=  6144  policy_loss=+0.123  value_loss=+67.183  entropy=+1.341  mean_return=-32.99
+[update  7/8] timesteps=  7168  policy_loss=+0.195  value_loss=+5.763  entropy=+1.343  mean_return=-19.13
+[update  8/8] timesteps=  8192  policy_loss=+0.208  value_loss=+0.227  entropy=+1.328  mean_return=-22.92
+✓ Training complete: entropy trending down (+1.4020 → +1.3280), no NaN losses.
 ```
 
 **The script verifies on exit** (FR-027):
-- No printed `policy_loss` was `nan`.
-- The last `policy_loss` (`0.048`) is strictly less than the first (`0.142`).
+- No printed `policy_loss`, `value_loss`, or `entropy` was `nan`.
+- The last `entropy` is strictly less than the first (the policy is concentrating, even when single-update `policy_loss` jitters non-monotonically).
 - If either check fails, the script prints an actionable `FAIL: ...` line and exits non-zero.
 
 **The agent does NOT need to solve MountainCarContinuous here.** The mean return stays negative; that is expected. Solving the environment is what stage `2-mountaincar/` is for.
@@ -139,7 +139,9 @@ If you had your own work on TODOs 4 or 5 in your local copy, this will overwrite
 
 ```bash
 uv run python -c "
-from workshop_1.one_ppo.ppo_skeleton import PPOAgent
+import sys
+sys.path.insert(0, 'workshop-1/1-ppo')
+from ppo_skeleton import PPOAgent
 import gymnasium as gym, numpy as np
 
 env = gym.make('MountainCarContinuous-v0')
@@ -154,6 +156,8 @@ print('loaded   action:', loaded.predict(obs, deterministic=True))
 "
 ```
 
+The `sys.path` insert is required because the stage-1 directory is `workshop-1/1-ppo/` (with hyphens and a leading digit), which is not a valid Python package path. Run the command from the repo root.
+
 **Expected**: the two printed actions are identical. If they differ, `save` / `load` is dropping state — investigate which key in the `state_dict` is missing.
 
 ---
@@ -162,11 +166,14 @@ print('loaded   action:', loaded.predict(obs, deterministic=True))
 
 ```bash
 uv run python -c "
-from workshop_1.two_mountaincar.agent import MountainCarPPOAgent
+import sys
+sys.path.insert(0, 'workshop-1/1-ppo')
+sys.path.insert(0, 'workshop-1/2-mountaincar')
+from agent import MountainCarPPOAgent
 agent = MountainCarPPOAgent(obs_dim=2, action_dim=1)
 agent.save('/tmp/mc.pt')
 
-from workshop_1.one_ppo.ppo_skeleton import PPOAgent
+from ppo_skeleton import PPOAgent
 loaded = PPOAgent.load('/tmp/mc.pt')
 print('loaded class:', type(loaded).__name__)
 "
@@ -189,7 +196,7 @@ When all of the following are true, this spec is implemented correctly:
 - [ ] `uv run python workshop-1/1-ppo/test_ppo.py` runs all five steps and reports `5 / 5 passed` after solving every TODO (against the reference implementation).
 - [ ] `uv run python workshop-1/1-ppo/test_ppo.py --step 1` passes when TODO 1 is solved AND TODOs 2–5 are unfinished.
 - [ ] `uv run python workshop-1/1-ppo/test_agent_interface.py --agent ppo` reports all PASS against the reference implementation.
-- [ ] `uv run python workshop-1/1-ppo/ppo_skeleton.py` runs in 1–3 minutes, prints 8 update lines with downward `policy_loss`, and exits zero.
+- [ ] `uv run python workshop-1/1-ppo/ppo_skeleton.py` runs in 1–3 minutes, prints 8 update lines with downward `entropy`, and exits zero.
 - [ ] `git checkout ws1-todo3-done -- workshop-1/1-ppo/ppo_skeleton.py` produces a file where `--step 3` passes and `--step 4` is `NOT_IMPLEMENTED`.
 - [ ] `MountainCarPPOAgent.save` followed by `PPOAgent.load` returns a `MountainCarPPOAgent`, not a plain `PPOAgent`.
 - [ ] All print statements, comments, docstrings, and error messages in `ppo_skeleton.py` and `test_ppo.py` are in English.
