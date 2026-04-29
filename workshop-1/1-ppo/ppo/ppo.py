@@ -300,20 +300,31 @@ class PPOAgent:
 
         for update_idx in range(1, n_updates + 1):
             # ----- rollout collection -----
+            # Keep policy/value tensors on self.device for the whole rollout
+            # and sync to numpy ONCE at the end. The only forced per-step
+            # sync is action.cpu().numpy() (env.step needs numpy). Rewards
+            # and dones come from env.step as numpy and stay on CPU until
+            # the bulk transfer.
+            obs_acc: list[torch.Tensor] = []
+            action_acc: list[torch.Tensor] = []
+            log_prob_acc: list[torch.Tensor] = []
+            value_acc: list[torch.Tensor] = []
+            reward_acc: list[np.ndarray] = []
+            done_acc: list[np.ndarray] = []
+
             for _ in range(size_per_env):
                 obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
                 with torch.no_grad():
-                    action, log_prob = self.sample_action(obs_t, deterministic=False)
+                    action_t, log_prob_t = self.sample_action(obs_t, deterministic=False)
                     value_t = self.critic(obs_t)  # (N,)
-                action_np = action.detach().cpu().numpy().astype(np.float32)
-                value_np = value_t.detach().cpu().numpy().astype(np.float32)
-                log_prob_np = log_prob.detach().cpu().numpy().astype(np.float32)
 
+                # The one unavoidable per-step sync: env.step needs numpy.
+                action_np = action_t.detach().cpu().numpy().astype(np.float32)
                 next_obs, reward, terminated, truncated, info = env.step(action_np)
                 reward = reward.astype(np.float32)
                 done = np.logical_or(terminated, truncated).astype(np.float32)
 
-                # Track per-env episode returns; store completed ones for logging.
+                # Per-env episode returns, on CPU using the pre-bootstrap reward.
                 current_returns += reward
                 done_mask = (terminated | truncated)
                 if done_mask.any():
@@ -322,9 +333,10 @@ class PPOAgent:
                         current_returns[i] = 0.0
 
                 # Bootstrap through truncations (not terminations). With
-                # SAME_STEP autoreset, env.step has already reset and
-                # next_obs[i] is the post-reset obs; the *true* final obs
-                # of the just-ended episode is in info["final_obs"][i].
+                # SAME_STEP autoreset, the true final obs is in
+                # info["final_obs"][i]. The critic forward + .cpu() sync
+                # only happens when at least one env truncated this step
+                # (not every step), so it does not dominate.
                 trunc_only = truncated & (~terminated)
                 if trunc_only.any() and "final_obs" in info:
                     final_obs_arr = info["final_obs"]
@@ -341,15 +353,32 @@ class PPOAgent:
                         for k, i in enumerate(trunc_idxs):
                             reward[i] = reward[i] + gamma * float(terminal_values[k])
 
-                ## TODO: add to buffer
-                buffer.add(obs, action_np, log_prob_np, reward, done, value_np)
+                obs_acc.append(obs_t)
+                action_acc.append(action_t.detach())
+                log_prob_acc.append(log_prob_t.detach())
+                value_acc.append(value_t.detach())
+                reward_acc.append(reward)
+                done_acc.append(done)
 
                 timesteps += num_envs
                 obs = next_obs
 
+            # End-of-rollout: stack lists into (T, N, ...) device tensors and
+            # transfer once per quantity. Single bulk MPS→CPU per array.
+            obs_stack = torch.stack(obs_acc, dim=0)
+            action_stack = torch.stack(action_acc, dim=0)
+            log_prob_stack = torch.stack(log_prob_acc, dim=0)
+            value_stack = torch.stack(value_acc, dim=0)
+
+            buffer.obs[:] = obs_stack.cpu().numpy()
+            buffer.actions[:] = action_stack.cpu().numpy()
+            buffer.log_probs[:] = log_prob_stack.cpu().numpy()
+            buffer.values[:] = value_stack.cpu().numpy()
+            buffer.rewards[:] = np.stack(reward_acc, axis=0)
+            buffer.dones[:] = np.stack(done_acc, axis=0)
+
             # Bootstrap final value for envs that did NOT just terminate.
-            # (For envs that terminated on the last step, dones[T-1]=1 and
-            # the GAE recurrence already cuts the bootstrap.)
+            # (dones[T-1]=1 cuts the GAE bootstrap automatically when needed.)
             with torch.no_grad():
                 last_value = self.critic(
                     torch.as_tensor(obs, dtype=torch.float32, device=self.device)
