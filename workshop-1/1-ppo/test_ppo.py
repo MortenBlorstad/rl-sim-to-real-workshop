@@ -1,4 +1,4 @@
-"""Per-TODO test runner for ppo_skeleton.py.
+"""Per-TODO test runner for ppo.py.
 
 Run all five tests:
 
@@ -16,7 +16,7 @@ Exit codes:
 Each test does a LOCAL import of only the symbol it needs, so
 ``--step 1`` works even when TODOs 2–5 are still raising
 ``NotImplementedError``. Do not add a top-level
-``from ppo_skeleton import *`` here — it would break that isolation.
+``from ppo import *`` here — it would break that isolation.
 
 Spec: specs/001-ppo-skeleton/spec.md
 Contract: specs/001-ppo-skeleton/contracts/test-runner-cli.md
@@ -28,7 +28,7 @@ import os
 import sys
 from typing import Callable
 
-# Make ``ppo_skeleton`` importable regardless of current working directory.
+# Make ``ppo`` importable regardless of current working directory.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
@@ -78,7 +78,7 @@ def test_step_1() -> None:
     """Validate compute_gae against a hand-computed reference."""
     import torch
 
-    from ppo_skeleton import compute_gae
+    from ppo import compute_gae
 
     # Case 1 — no done flags. Hand-computed closed-form reference.
     rewards = torch.tensor([1.0, 1.0, 1.0, 1.0], dtype=torch.float32)
@@ -139,7 +139,7 @@ def test_step_2() -> None:
     """Validate sample_action shape, dtype, range, and stochastic behavior."""
     import torch
 
-    from ppo_skeleton import ActorNetwork, sample_action
+    from ppo import ActorNetwork, sample_action
 
     torch.manual_seed(0)
     obs_dim, action_dim = 2, 1
@@ -221,7 +221,7 @@ def test_step_3() -> None:
     import torch
     from torch.distributions import Normal
 
-    from ppo_skeleton import ActorNetwork, evaluate_actions
+    from ppo import ActorNetwork, evaluate_actions
 
     torch.manual_seed(0)
     obs_dim, action_dim = 2, 1
@@ -275,7 +275,7 @@ def test_step_4() -> None:
     """Validate ppo_loss unclipped branch, clipped branch, and scalar/grad."""
     import torch
 
-    from ppo_skeleton import ppo_loss
+    from ppo import ppo_loss
 
     B = 16
 
@@ -350,7 +350,7 @@ def test_step_5() -> None:
     import torch
     import torch.nn as nn
 
-    from ppo_skeleton import ActorNetwork, ValueNetwork, train
+    from ppo import ActorNetwork, ValueNetwork, train
 
     env = gym.make("MountainCarContinuous-v0")
     env.reset(seed=0)
@@ -428,7 +428,7 @@ def test_step_5() -> None:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Per-TODO test runner for ppo_skeleton.py."
+        description="Per-TODO test runner for ppo.py."
     )
     parser.add_argument(
         "--step",

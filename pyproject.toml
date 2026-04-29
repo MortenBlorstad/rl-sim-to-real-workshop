@@ -14,6 +14,7 @@ workshop1 = [
     "matplotlib",
     "stable-baselines3",
     "tensorboard",
+    "imageio[ffmpeg]>=2.31",
 ]
 workshop2 = [
     "gym-donkeycar",

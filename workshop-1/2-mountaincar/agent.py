@@ -5,7 +5,7 @@ This file demonstrates the override-contract pattern from
 the extension point for stage 2 (``workshop-1/2-mountaincar/``).
 
 The stage-1 base ``PPOAgent`` already trains MountainCarContinuous-v0
-in script mode (``workshop-1/1-ppo/ppo_skeleton.py``), so this stub
+in script mode (``workshop-1/1-ppo/ppo.py``), so this stub
 is intentionally minimal — ``preprocess`` is identity. Stage 2 may
 extend this subclass with reward shaping, an observation normalizer,
 or hyperparameter tuning to actually solve the environment.
@@ -20,7 +20,7 @@ _PPO_DIR = os.path.normpath(os.path.join(_HERE, "..", "1-ppo"))
 if _PPO_DIR not in sys.path:
     sys.path.insert(0, _PPO_DIR)
 
-from ppo_skeleton import PPOAgent, register_agent  # noqa: E402
+from ppo import PPOAgent, register_agent 
 
 
 @register_agent
@@ -33,4 +33,9 @@ class MountainCarPPOAgent(PPOAgent):
     """
 
     def preprocess(self, obs):
-        return obs
+        # normalize between -1 and 1, but keep the shape (1, obs_dim) for compatibility with PPOAgent's MLP policy
+        obs_min = self.obs_min
+        obs_max = self.obs_max
+        obs_norm = (obs - obs_min) / (obs_max - obs_min) * 2 - 1
+        return obs_norm
+        

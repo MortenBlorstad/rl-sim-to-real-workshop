@@ -8,7 +8,7 @@ buffer, PPOAgent class) is provided complete.
 Run as a script to see the training loop execute on
 MountainCarContinuous-v0:
 
-    uv run python workshop-1/1-ppo/ppo_skeleton.py
+    uv run python workshop-1/1-ppo/ppo.py
 
 Run the per-step tests via:
 
@@ -114,7 +114,7 @@ class ValueNetwork(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Helper — RolloutBuffer (provided complete)
+# Helper — RolloutBuffer
 # ---------------------------------------------------------------------------
 
 
@@ -188,9 +188,17 @@ class RolloutBuffer:
     def reset(self) -> None:
         self.idx = 0
 
+# ---------------------------------------------------------------------------
+# Helper — random seeding for reproducibility
+# ---------------------------------------------------------------------------
+
+def _seed_everything(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
 # ---------------------------------------------------------------------------
-# Helper — log line formatter (provided complete)
+# Helper — log line formatter
 # ---------------------------------------------------------------------------
 
 
@@ -202,6 +210,7 @@ def format_update_line(
     value_loss: float,
     entropy: float,
     mean_return: float,
+    lr: float
 ) -> str:
     """Format one fixed-width log line for the training loop.
 
@@ -211,6 +220,7 @@ def format_update_line(
     return (
         f"[update {update_idx:2d}/{n_updates}] "
         f"timesteps={timesteps:6d}  "
+        f"lr={lr:.3e}  " 
         f"policy_loss={policy_loss:+.3f}  "
         f"value_loss={value_loss:+.3f}  "
         f"entropy={entropy:+.3f}  "
@@ -275,6 +285,8 @@ def sample_action(
     obs: torch.Tensor,
     log_std: torch.Tensor,
     deterministic: bool = False,
+    action_low: float = -1.0,
+    action_high: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Sample an action from the policy and return ``(action, log_prob)``.
 
@@ -294,7 +306,7 @@ def sample_action(
         2. dist = torch.distributions.Normal(mean, log_std.exp())
         3. unclipped = mean if deterministic else dist.sample()
         4. log_prob  = dist.log_prob(unclipped).sum(dim=-1)
-        5. action    = unclipped.clamp(-1.0, 1.0)
+        5. action    = unclipped.clamp(action_low, action_high)
 
     Important: log_prob is computed on the UNCLIPPED sample. Clipping
     only the returned action keeps the gradient honest.
@@ -307,7 +319,7 @@ def sample_action(
     else:
         unclipped = dist.sample()
     log_prob = dist.log_prob(unclipped).sum(dim=-1)
-    action = unclipped.clamp(-1.0, 1.0)
+    action = unclipped.clamp(action_low, action_high)
     return action, log_prob
     # -- END YOUR CODE --
 
@@ -412,6 +424,7 @@ def train(
     max_grad_norm: float = 0.5,
     seed: int = DEFAULT_SEED,
     log_fn=print,
+    reward_shaping_fn=None,
 ) -> dict:
     """Wire everything together into a working PPO training loop.
 
@@ -461,13 +474,23 @@ def train(
 
     obs_dim = int(np.prod(env.observation_space.shape))
     action_dim = int(np.prod(env.action_space.shape))
+    action_low = torch.as_tensor(env.action_space.low, dtype=torch.float32)
+    action_high = torch.as_tensor(env.action_space.high, dtype=torch.float32)
+    actor.action_low = action_low
+    actor.action_high = action_high
 
     optimizer = torch.optim.Adam(
         list(actor.parameters()) + list(value.parameters()) + [log_std],
-        lr=lr,
+        lr=lr,eps=1e-5
+    )
+    n_updates = max(1, total_timesteps // rollout_size)
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=lambda step: 1.0 - step / n_updates,
     )
     buffer = RolloutBuffer(rollout_size, obs_dim, action_dim)
-    n_updates = max(1, total_timesteps // rollout_size)
+    
 
     obs, _ = env.reset(seed=seed)
     episode_returns: list[float] = []
@@ -481,13 +504,22 @@ def train(
         for _ in range(rollout_size):
             obs_t = torch.as_tensor(obs, dtype=torch.float32)
             with torch.no_grad():
-                action, log_prob = sample_action(actor, obs_t, log_std)
+                action, log_prob = sample_action(actor, obs_t, log_std, deterministic=False, action_low=action_low, action_high=action_high)
                 value_t = value(obs_t).item()
             action_np = action.detach().cpu().numpy().astype(np.float32)
             next_obs, reward, terminated, truncated, _ = env.step(action_np)
             done = bool(terminated or truncated)
-            buffer.add(obs, action_np, log_prob.item(), reward, done, value_t)
+
+            # Bootstrap through truncations (not terminations)
             current_return += float(reward)
+            if truncated and not terminated:
+                with torch.no_grad():
+                    terminal_value = value(torch.as_tensor(next_obs, dtype=torch.float32)).item()
+                reward = reward + gamma * terminal_value
+
+            buffer.add(obs, action_np, log_prob.item(), reward, done, value_t)
+            
+            
             timesteps += 1
             if done:
                 episode_returns.append(current_return)
@@ -534,6 +566,7 @@ def train(
                 last_p_loss = float(p_loss.item())
                 last_v_loss = float(v_loss.item())
                 last_entropy = float(ent.mean().item())
+        
 
         mean_return = (
             float(np.mean(episode_returns[-10:])) if episode_returns else current_return
@@ -541,9 +574,10 @@ def train(
         log_fn(
             format_update_line(
                 update_idx, n_updates, timesteps,
-                last_p_loss, last_v_loss, last_entropy, mean_return,
+                last_p_loss, last_v_loss, last_entropy, mean_return, lr=scheduler.get_last_lr()[0]
             )
         )
+        scheduler.step()
         buffer.reset()
 
         final_stats = {
@@ -559,7 +593,7 @@ def train(
 
 
 # ---------------------------------------------------------------------------
-# PPOAgent — Constitution Article II contract (Path A)
+# PPOAgent 
 # ---------------------------------------------------------------------------
 
 
@@ -576,11 +610,11 @@ class PPOAgent:
     """
 
     DEFAULT_HYPERPARAMS: dict = {
-        "rollout_size": 1024,
-        "n_epochs": 4,
+        "rollout_size": 2048,
+        "n_epochs": 10,
         "batch_size": 64,
-        "lr": 3e-4,
-        "gamma": 0.99,
+        "lr": 1e-3,
+        "gamma": 0.98,
         "gae_lambda": 0.95,
         "clip_eps": 0.2,
         "value_coef": 0.5,
@@ -590,20 +624,40 @@ class PPOAgent:
 
     def __init__(
         self,
-        obs_dim: int,
-        action_dim: int,
+        env=None,
+        *,
+        obs_dim: int | None = None,
+        action_dim: int | None = None,
+        action_min: torch.Tensor | None = None,
+        action_max: torch.Tensor | None = None,
         hyperparameters: dict | None = None,
     ):
+        if env is not None:
+            obs_dim = int(np.prod(env.observation_space.shape))
+            action_dim = int(np.prod(env.action_space.shape))
+            action_min = torch.as_tensor(env.action_space.low, dtype=torch.float32)
+            action_max = torch.as_tensor(env.action_space.high, dtype=torch.float32)
+            obs_min = env.observation_space.low
+            obs_max = env.observation_space.high
+        
+        self.obs_min = obs_min
+        self.obs_max = obs_max
+
         self.obs_dim = obs_dim
         self.action_dim = action_dim
-        self.hyperparameters: dict = dict(self.DEFAULT_HYPERPARAMS)
+        self.action_min = action_min
+        self.action_max = action_max
+
+        self.hyperparameters = dict(self.DEFAULT_HYPERPARAMS)
         if hyperparameters:
             self.hyperparameters.update(hyperparameters)
         self.actor = ActorNetwork(obs_dim, action_dim)
         self.value = ValueNetwork(obs_dim)
-        self.log_std = nn.Parameter(torch.zeros(action_dim))
+        self.log_std = nn.Parameter(torch.ones(action_dim)*0.5)
 
-    # ------ Article II contract ------
+    
+
+    
 
     def preprocess(self, obs: np.ndarray) -> np.ndarray:
         """Identity preprocess in the base class. Subclasses may override."""
@@ -615,11 +669,11 @@ class PPOAgent:
         obs_tensor = torch.as_tensor(np.asarray(processed, dtype=np.float32))
         with torch.no_grad():
             action, _ = sample_action(
-                self.actor, obs_tensor, self.log_std, deterministic=deterministic
+                self.actor, obs_tensor, self.log_std, deterministic=deterministic, action_low=self.action_min, action_high=self.action_max,
             )
         return action.cpu().numpy().astype(np.float32)
 
-    def train(self, env, total_timesteps: int) -> dict:
+    def train(self, env, total_timesteps: int, log_fn = print) -> dict:
         """Delegate to the module-level ``train()`` function."""
         return train(
             env,
@@ -628,6 +682,7 @@ class PPOAgent:
             self.log_std,
             total_timesteps=total_timesteps,
             **self.hyperparameters,
+            log_fn=log_fn,
         )
 
     def save(self, path: str) -> None:
@@ -635,7 +690,11 @@ class PPOAgent:
         state = {
             "class_name": type(self).__name__,
             "obs_dim": self.obs_dim,
+            "obs_min": self.obs_min,
+            "obs_max": self.obs_max,
             "action_dim": self.action_dim,
+            "action_min": self.action_min,
+            "action_max": self.action_max,
             "actor_state_dict": self.actor.state_dict(),
             "value_state_dict": self.value.state_dict(),
             "log_std": self.log_std.detach().clone(),
@@ -659,6 +718,10 @@ class PPOAgent:
         agent = target_cls(
             obs_dim=state["obs_dim"],
             action_dim=state["action_dim"],
+            action_min=state["action_min"],
+            action_max=state["action_max"],
+            obs_min=state["obs_min"],
+            obs_max=state["obs_max"],
             hyperparameters=state["hyperparameters"],
         )
         agent.actor.load_state_dict(state["actor_state_dict"])
@@ -682,12 +745,6 @@ class PPOAgent:
 # ---------------------------------------------------------------------------
 # Script entry point
 # ---------------------------------------------------------------------------
-
-
-def _seed_everything(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
 
 
 def _main() -> int:

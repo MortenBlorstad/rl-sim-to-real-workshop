@@ -32,7 +32,7 @@ import os
 import sys
 from typing import Callable
 
-# Make ``ppo_skeleton`` importable regardless of current working directory.
+# Make ``ppo`` importable regardless of current working directory.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
@@ -77,7 +77,7 @@ def _run_step(n: int) -> str:
 
 @step(1, "C1 registry contains PPOAgent")
 def test_registry_contains_ppoagent() -> None:
-    from ppo_skeleton import _AGENT_REGISTRY
+    from ppo import _AGENT_REGISTRY
 
     assert "PPOAgent" in _AGENT_REGISTRY, (
         f"PPOAgent must be registered via @register_agent. "
@@ -94,7 +94,7 @@ def test_registry_contains_ppoagent() -> None:
 def test_preprocess_identity() -> None:
     import numpy as np
 
-    from ppo_skeleton import PPOAgent
+    from ppo import PPOAgent
 
     agent = PPOAgent(obs_dim=2, action_dim=1)
     x = np.array([0.1, -0.2], dtype=np.float32)
@@ -111,7 +111,7 @@ def test_preprocess_identity() -> None:
 def test_preprocess_deterministic() -> None:
     import numpy as np
 
-    from ppo_skeleton import PPOAgent
+    from ppo import PPOAgent
 
     agent = PPOAgent(obs_dim=2, action_dim=1)
     x = np.random.RandomState(0).randn(2).astype(np.float32)
@@ -127,7 +127,7 @@ def test_preprocess_deterministic() -> None:
 def test_subclass_override_used_by_predict() -> None:
     import numpy as np
 
-    from ppo_skeleton import PPOAgent, register_agent
+    from ppo import PPOAgent, register_agent
 
     @register_agent
     class _ScalingAgent(PPOAgent):
@@ -162,7 +162,7 @@ def test_subclass_override_used_by_predict() -> None:
 def test_predict_raw_obs_shape_dtype_range() -> None:
     import numpy as np
 
-    from ppo_skeleton import PPOAgent
+    from ppo import PPOAgent
 
     agent = PPOAgent(obs_dim=2, action_dim=1)
     raw = np.array([0.1, -0.2], dtype=np.float32)
@@ -187,7 +187,7 @@ def test_predict_raw_obs_shape_dtype_range() -> None:
 def test_predict_deterministic_flag() -> None:
     import numpy as np
 
-    from ppo_skeleton import PPOAgent
+    from ppo import PPOAgent
 
     agent = PPOAgent(obs_dim=2, action_dim=1)
     raw = np.array([0.1, -0.2], dtype=np.float32)
@@ -208,7 +208,7 @@ def test_predict_deterministic_flag() -> None:
 def test_train_method_smoke() -> None:
     import gymnasium as gym
 
-    from ppo_skeleton import PPOAgent
+    from ppo import PPOAgent
 
     env = gym.make("MountainCarContinuous-v0")
     env.reset(seed=0)
@@ -245,7 +245,7 @@ def test_save_load_roundtrip_base() -> None:
 
     import numpy as np
 
-    from ppo_skeleton import PPOAgent
+    from ppo import PPOAgent
 
     agent = PPOAgent(obs_dim=2, action_dim=1)
     raw = np.array([0.3, -0.4], dtype=np.float32)
@@ -278,7 +278,7 @@ def test_save_load_roundtrip_subclass_class_restored() -> None:
 
     import numpy as np
 
-    from ppo_skeleton import PPOAgent, register_agent
+    from ppo import PPOAgent, register_agent
 
     @register_agent
     class _RoundTripAgent(PPOAgent):
@@ -317,7 +317,7 @@ def test_save_load_roundtrip_subclass_class_restored() -> None:
 
 @step(10, "C6 base preprocess_state is no-op")
 def test_get_set_preprocess_state_base_no_op() -> None:
-    from ppo_skeleton import PPOAgent
+    from ppo import PPOAgent
 
     agent = PPOAgent(obs_dim=2, action_dim=1)
     assert agent._get_preprocess_state() == {}, (
