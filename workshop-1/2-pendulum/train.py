@@ -33,8 +33,8 @@ _HERE = Path(__file__).resolve().parent
 _WORKSHOP1 = _HERE.parent
 sys.path.insert(0, str(_WORKSHOP1 / "1-ppo"))
 
-from ppo import PPOAgent  # noqa: E402
-from ppo.utils import (  # noqa: E402
+from ppo import PPOAgent  
+from ppo.utils import (  
     RunDirectoryExistsError,
     RunLogger,
     make_log_fn,
@@ -43,8 +43,8 @@ from ppo.utils import (  # noqa: E402
 
 
 DEFAULT_TIMESTEPS = 200_000
-ENV_ID = "MountainCarContinuous-v0"
-STAGE = "mountaincar"
+ENV_ID = "Pendulum-v1"
+STAGE = "pendulum"
 
 hyperparameters: dict = {
     "rollout_size": 2048,
@@ -55,15 +55,15 @@ hyperparameters: dict = {
     "gae_lambda": 0.95,
     "clip_eps": 0.2,
     "value_coef": 0.5,
-    "entropy_coef": 0.01,
+    "entropy_coef": 0.0,
     "max_grad_norm": 0.5,
     "log_std_init": 0.0,
     "random_state": 42,
 }
 
 
-class NormalizeObs(gym.ObservationWrapper):
-    """Min-max normalize observations to ``[0, 1]`` using the env's bounds."""
+class ObsToState(gym.ObservationWrapper):
+    
 
     def __init__(self, env: gym.Env):
         super().__init__(env)
@@ -71,7 +71,7 @@ class NormalizeObs(gym.ObservationWrapper):
         self.obs_high = self.observation_space.high
 
     def observation(self, obs):
-        return (obs - self.obs_low) / (self.obs_high - self.obs_low)
+        return obs
 
 
 def main() -> int:
@@ -88,7 +88,7 @@ def main() -> int:
     seed_everything(seed)
 
     env = gym.make(ENV_ID)
-    env = NormalizeObs(env)
+    env = ObsToState(env)
     agent = PPOAgent(env, hyperparameters=hyperparameters)
 
     runs_root = _WORKSHOP1.parent / "runs"

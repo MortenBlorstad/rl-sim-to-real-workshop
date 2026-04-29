@@ -49,6 +49,7 @@ def format_update_line(
 # ---------------------------------------------------------------------------
 def get_device() -> torch.device:
     """Get the best available device (GPU if available, elif MPS, else CPU)."""
+    return torch.device("cpu")
     if torch.cuda.is_available():
         return torch.device("cuda")
     elif torch.backends.mps.is_available():

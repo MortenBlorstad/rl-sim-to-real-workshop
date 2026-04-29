@@ -1,10 +1,8 @@
-"""MountainCarContinuous-v0 — Stable-Baselines3 alternative training driver.
+"""Pendulum-v1 — Stable-Baselines3 alternative training driver.
 
 The constitutional escape hatch: if you couldn't finish the stage-1 PPO TODOs,
 this driver still produces a working trained agent + the same canonical
 ``runs/<stage>/<run-name>/`` layout that ``analyze.ipynb`` expects.
-
-No observation wrappers — MountainCar is a vector env.
 """
 from __future__ import annotations
 
@@ -16,18 +14,21 @@ import gymnasium as gym
 
 _HERE = Path(__file__).resolve().parent
 _WORKSHOP1 = _HERE.parent
-sys.path.insert(0, str(_WORKSHOP1))
+sys.path.insert(0, str(_WORKSHOP1 / "1-ppo"))
 
-from _runlog import RunLogger, RunDirectoryExistsError  # noqa: E402
-from _eval import record_eval_episode  # noqa: E402
-from _sb3_jsonl_callback import Sb3JsonlCallback  # noqa: E402
+from ppo.utils import (  # noqa: E402
+    RunDirectoryExistsError,
+    RunLogger,
+    Sb3JsonlCallback,
+    record_eval_episode,
+)
 
 from stable_baselines3 import PPO  # noqa: E402
 
-DEFAULT_TIMESTEPS = 100_000
+DEFAULT_TIMESTEPS = 200_000
 DEFAULT_SEED = 42
-ENV_ID = "MountainCarContinuous-v0"#"Pendulum-v1"
-STAGE = "mountaincar"
+ENV_ID = "Pendulum-v1"
+STAGE = "pendulum"
 
 
 def main() -> int:
@@ -45,21 +46,15 @@ def main() -> int:
     model = PPO(
         "MlpPolicy",
         env,
-        gamma=0.9999,
+        gamma=0.98,
         # Using https://proceedings.mlr.press/v164/raffin22a.html
-        use_sde=True,
+        use_sde=False,
         #sde_sample_freq=4,
-        learning_rate=7.77e-05,
+        learning_rate=1e-3,
         n_epochs=10,
-        max_grad_norm=5,
-        ent_coef=0.00429,
-        clip_range=0.1,
-        n_steps=8,
-        policy_kwargs={'log_std_init': -3.29, 'ortho_init': False},
-
-
-
-
+        ent_coef=0.0,
+        clip_range=0.2,
+        n_steps=1024,
         verbose=1,
     )
 
