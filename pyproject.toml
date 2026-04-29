@@ -13,6 +13,7 @@ workshop1 = [
     "opencv-python",
     "matplotlib",
     "stable-baselines3",
+    "huggingface-hub>=0.20",
     "tensorboard",
     "imageio[ffmpeg]>=2.31",
 ]

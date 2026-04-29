@@ -20,6 +20,7 @@ def record_eval_episode(
     max_steps: int = 1000,
     seed: int = 0,
     reset_preprocess_state_fn: Optional[Callable[[], None]] = None,
+    wrappers: Optional[list] = None,
 ) -> Path:
     """Run one greedy episode and write ``<run_dir>/eval.mp4``.
 
@@ -51,7 +52,9 @@ def record_eval_episode(
 
     
     env = gym.make(env_id, render_mode="rgb_array")
-    
+    if wrappers:
+        for w in wrappers:
+            env = w(env)
     env = RecordVideo(
         env,
         video_folder=str(run_dir),

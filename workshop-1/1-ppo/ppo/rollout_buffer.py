@@ -29,13 +29,19 @@ class RolloutBuffer:
         obs_dim: int,
         action_dim: int,
         num_envs: int = 1,
+        obs_shape: tuple | None = None,
     ):
         self.size = size
         self.num_envs = num_envs
         self.total = size * num_envs
         self.obs_dim = obs_dim
         self.action_dim = action_dim
-        self.obs = np.zeros((size, num_envs, obs_dim), dtype=np.float32)
+        # When obs_shape is supplied (e.g. (4, 84, 84) for CNN), store obs
+        # with that full shape so the update phase can reshape batches back
+        # to (B, *obs_shape) for the conv forward. When omitted (MLP), fall
+        # back to the flat (size, num_envs, obs_dim) layout used by Pendulum.
+        self.obs_shape = obs_shape if obs_shape is not None else (obs_dim,)
+        self.obs = np.zeros((size, num_envs, *self.obs_shape), dtype=np.float32)
         self.actions = np.zeros((size, num_envs, action_dim), dtype=np.float32)
         self.log_probs = np.zeros((size, num_envs), dtype=np.float32)
         self.rewards = np.zeros((size, num_envs), dtype=np.float32)
@@ -121,7 +127,7 @@ class RolloutBuffer:
     def get_batches(self, batch_size: int) -> Iterator[dict]:
         """Yield shuffled minibatches flattened across (size, num_envs)."""
         total = self.total
-        obs_flat = self.obs.reshape(total, self.obs_dim)
+        obs_flat = self.obs.reshape(total, *self.obs_shape)
         actions_flat = self.actions.reshape(total, self.action_dim)
         log_probs_flat = self.log_probs.reshape(total)
         adv_flat = self.advantages.reshape(total)

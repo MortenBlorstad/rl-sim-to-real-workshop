@@ -10,7 +10,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Normal
 
-from .networks import ActorNetwork, CriticNetwork
+from .networks import (
+    ActorNetwork,
+    CnnActorNetwork,
+    CnnCriticNetwork,
+    CriticNetwork,
+    make_cnn_trunk,
+)
 from .rollout_buffer import RolloutBuffer
 from .utils import format_update_line, get_device, seed_everything
 
@@ -76,12 +82,60 @@ class PPOAgent:
         )
         self.obs_min = single_obs_space.low
         self.obs_max = single_obs_space.high
-        self.actor = ActorNetwork(self.obs_dim, self.action_dim).to(self.device)
-        self.critic = CriticNetwork(self.obs_dim).to(self.device)
+
+        # Auto-select MLP vs CNN architecture from the observation shape.
+        # 1D obs (e.g. Pendulum's (3,)) -> MLP. 3D obs (e.g. CarRacing's
+        # (4, 84, 84) after Resize→Grayscale→FrameStack) -> shared-trunk CNN.
+        # See specs/005-carracing-drivers/data-model.md.
+        obs_shape = tuple(single_obs_space.shape)
+        if len(obs_shape) == 1:
+            self.network_arch = "mlp"
+            self.actor = ActorNetwork(self.obs_dim, self.action_dim).to(self.device)
+            self.critic = CriticNetwork(self.obs_dim).to(self.device)
+        elif len(obs_shape) == 3:
+            self.network_arch = "cnn"
+            in_channels = obs_shape[0]
+            trunk = make_cnn_trunk(in_channels).to(self.device)
+            # Same trunk instance shared between actor and critic; PPOAgent
+            # deduplicates parameters in _trainable_parameters() so the
+            # optimizer doesn't update the trunk twice per step.
+            self.actor = CnnActorNetwork(trunk, self.action_dim).to(self.device)
+            self.critic = CnnCriticNetwork(trunk).to(self.device)
+        else:
+            raise ValueError(
+                f"PPOAgent: unsupported observation shape {obs_shape}. "
+                f"Expected 1D (vector) or 3D (image) observations after env wrappers."
+            )
+
         self.log_std = nn.Parameter(
             torch.ones(self.action_dim, device=self.device)
             * self.hyperparameters["log_std_init"]
         )
+
+    def _prep_obs(self, obs) -> torch.Tensor:
+        """Convert a raw observation (numpy or tensor) into a float32 tensor
+        on ``self.device``. For CNN agents, divides by 255 so the conv
+        stack sees inputs in [0, 1] (matching SB3's CnnPolicy).
+        """
+        t = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+        if self.network_arch == "cnn":
+            t = t / 255.0
+        return t
+
+    def _trainable_parameters(self) -> list[nn.Parameter]:
+        """Return the unique parameters spanning actor + critic + log_std.
+
+        For CNN agents the trunk is shared between actor and critic; without
+        this dedup the optimizer would update the trunk weights twice per
+        step. The MLP path has no shared params so dedup is a no-op.
+        """
+        seen: set[int] = set()
+        unique: list[nn.Parameter] = []
+        for p in list(self.actor.parameters()) + list(self.critic.parameters()) + [self.log_std]:
+            if id(p) not in seen:
+                seen.add(id(p))
+                unique.append(p)
+        return unique
 
     # ===========================================================================
     # TODO 2 — Sample an action from the policy
@@ -279,7 +333,7 @@ class PPOAgent:
         size_per_env = rollout_size // num_envs
 
         optimizer = torch.optim.Adam(
-            list(self.actor.parameters()) + list(self.critic.parameters()) + [self.log_std],
+            self._trainable_parameters(),
             lr=lr,
             eps=1e-5,
         )
@@ -290,7 +344,17 @@ class PPOAgent:
             lr_lambda=lambda step: 1.0 - step / n_updates,
         )
         # TODO: Initialize rollout buffer
-        buffer = RolloutBuffer(size_per_env, self.obs_dim, self.action_dim, num_envs=num_envs)
+        # Store obs with their full shape so CNN batches can be reshaped
+        # back to (B, C, H, W) for the conv forward. For MLP, this is just
+        # (obs_dim,) and the existing flat layout is preserved.
+        obs_shape = tuple(env.single_observation_space.shape)
+        buffer = RolloutBuffer(
+            size_per_env,
+            self.obs_dim,
+            self.action_dim,
+            num_envs=num_envs,
+            obs_shape=obs_shape,
+        )
 
         obs, _ = env.reset(seed=random_state)  # (N, obs_dim)
         episode_returns: list[float] = []
@@ -313,7 +377,7 @@ class PPOAgent:
             done_acc: list[np.ndarray] = []
 
             for _ in range(size_per_env):
-                obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+                obs_t = self._prep_obs(obs)
                 with torch.no_grad():
                     action_t, log_prob_t = self.sample_action(obs_t, deterministic=False)
                     value_t = self.critic(obs_t)  # (N,)
@@ -348,7 +412,7 @@ class PPOAgent:
                         )
                         with torch.no_grad():
                             terminal_values = self.critic(
-                                torch.as_tensor(final_stack, dtype=torch.float32, device=self.device)
+                                self._prep_obs(final_stack)
                             ).detach().cpu().numpy()
                         for k, i in enumerate(trunc_idxs):
                             reward[i] = reward[i] + gamma * float(terminal_values[k])
@@ -381,7 +445,7 @@ class PPOAgent:
             # (dones[T-1]=1 cuts the GAE bootstrap automatically when needed.)
             with torch.no_grad():
                 last_value = self.critic(
-                    torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+                    self._prep_obs(obs)
                 ).detach().cpu().numpy().astype(np.float32)
 
             #TODO: compute returns and advantages in buffer
@@ -412,7 +476,7 @@ class PPOAgent:
                     optimizer.zero_grad()
                     loss.backward()
                     nn.utils.clip_grad_norm_(
-                        list(self.actor.parameters()) + list(self.critic.parameters()) + [self.log_std],
+                        self._trainable_parameters(),
                         max_grad_norm,
                     )
                     optimizer.step()
@@ -452,10 +516,10 @@ class PPOAgent:
     def predict(self, obs: np.ndarray, deterministic: bool = False) -> np.ndarray:
         """Take a raw observation (NumPy), return an action (NumPy).
 
-        Converts to a tensor on ``self.device`` at the boundary so callers
-        never touch torch.
+        Converts to a tensor on ``self.device`` at the boundary (and
+        normalises CNN inputs by /255) so callers never touch torch.
         """
-        obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+        obs_t = self._prep_obs(obs)
         with torch.no_grad():
             action, _ = self.sample_action(obs_t, deterministic=deterministic)
         return action.cpu().numpy().astype(np.float32)
@@ -556,6 +620,7 @@ class PPOAgent:
         """Persist model weights, hyperparameters, and preprocess state."""
         state = {
             "class_name": type(self).__name__,
+            "network_arch": self.network_arch,
             "actor_state_dict": self.actor.state_dict(),
             "value_state_dict": self.critic.state_dict(),
             "log_std": self.log_std.detach().clone(),
@@ -570,6 +635,10 @@ class PPOAgent:
         The ``env`` argument is required so the loaded agent can reconstruct
         ``obs_dim`` / ``action_dim`` / action bounds. Pass the same (wrapped)
         env you would use for training or evaluation.
+
+        If the saved checkpoint records a ``network_arch`` (added in feature
+        005), it is checked against the env-implied architecture. Older
+        checkpoints predating this field skip the check (backwards compat).
         """
         state = torch.load(path, weights_only=False)
         class_name = state["class_name"]
@@ -581,6 +650,14 @@ class PPOAgent:
             )
         target_cls = _AGENT_REGISTRY[class_name]
         agent = target_cls(env, hyperparameters=state["hyperparameters"])
+        saved_arch = state.get("network_arch")
+        if saved_arch is not None and saved_arch != agent.network_arch:
+            raise ValueError(
+                f"PPOAgent.load: saved checkpoint has network_arch={saved_arch!r} "
+                f"but the env implies network_arch={agent.network_arch!r}. The "
+                f"observation shape from the env doesn't match what the model "
+                f"was trained on; pass the same wrapper chain you trained with."
+            )
         agent.actor.load_state_dict(state["actor_state_dict"])
         agent.critic.load_state_dict(state["value_state_dict"])
         with torch.no_grad():

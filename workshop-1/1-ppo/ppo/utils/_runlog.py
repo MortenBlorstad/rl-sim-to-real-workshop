@@ -46,6 +46,9 @@ def _library_version(name: str) -> str:
         return "unknown"
 
 
+_UNSET = object()
+
+
 _DEFAULT_METRIC_DEFINITIONS: dict[str, str] = {
     "update": "1-indexed PPO update counter",
     "timesteps": "cumulative environment steps after this update",
@@ -87,6 +90,9 @@ class RunLogger:
         force: bool = False,
         runs_root: Path = Path("runs"),
         metric_definitions: dict[str, str] | None = None,
+        network_arch: str | None = None,
+        hf_repo_id=_UNSET,
+        hf_filename=_UNSET,
     ) -> None:
         self.stage = stage
         if run_name is None:
@@ -121,6 +127,15 @@ class RunLogger:
                 metric_definitions or _DEFAULT_METRIC_DEFINITIONS
             ),
         }
+        if network_arch is not None:
+            self._meta["network_arch"] = network_arch
+        # Always-present-with-null contract for SB3 runs: if either kwarg is
+        # passed (even as None), record both. The SB3 driver always passes
+        # them; custom-PPO drivers omit them entirely (the keys won't appear).
+        # See specs/005-carracing-drivers/contracts/meta-fields.md.
+        if hf_repo_id is not _UNSET or hf_filename is not _UNSET:
+            self._meta["hf_repo_id"] = hf_repo_id if hf_repo_id is not _UNSET else None
+            self._meta["hf_filename"] = hf_filename if hf_filename is not _UNSET else None
         self._write_meta()
 
         self._jsonl_path = self._run_dir / "metrics.jsonl"

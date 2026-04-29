@@ -307,6 +307,79 @@ def test_evaluate() -> None:
         env.close()
 
 
+# ===========================================================================
+# C8 — CNN smoke on (4, 84, 84) vec env (added in feature 005)
+# ===========================================================================
+
+
+@step(8, "C8 CNN smoke on (4, 84, 84) vec env")
+def test_cnn_smoke() -> None:
+    """Build a 2-env CarRacing vec env with the canonical wrapper chain,
+    construct PPOAgent (auto-detects CNN arch), train for 64 timesteps,
+    assert finite stats + < 10s budget.
+    """
+    import math
+    import time
+
+    import gymnasium as gym
+    from gymnasium.vector import AutoresetMode
+    from gymnasium.wrappers import (
+        FrameStackObservation,
+        GrayscaleObservation,
+        ResizeObservation,
+    )
+
+    from ppo import PPOAgent
+
+    def _wrap(env: gym.Env) -> gym.Env:
+        env = ResizeObservation(env, (84, 84))
+        env = GrayscaleObservation(env, keep_dim=False)
+        return env
+
+    def _frame_stack(env: gym.Env) -> gym.Env:
+        return FrameStackObservation(env, 4)
+
+    env = gym.make_vec(
+        "CarRacing-v3",
+        num_envs=2,
+        vectorization_mode="sync",
+        wrappers=[_wrap, _frame_stack],
+        vector_kwargs={"autoreset_mode": AutoresetMode.SAME_STEP},
+    )
+    try:
+        agent = PPOAgent(
+            env,
+            hyperparameters={
+                "rollout_size": 32,
+                "n_epochs": 1,
+                "batch_size": 16,
+                "random_state": 0,
+                "log_std_init": -0.5,
+            },
+        )
+        assert agent.network_arch == "cnn", (
+            f"expected network_arch='cnn' for (4, 84, 84) obs, got "
+            f"{agent.network_arch!r}"
+        )
+
+        t0 = time.perf_counter()
+        stats = agent.train(env, total_timesteps=64, random_state=0, log_fn=lambda _: None)
+        elapsed = time.perf_counter() - t0
+
+        assert elapsed < 10.0, (
+            f"C8 CNN smoke exceeded 10s budget (took {elapsed:.2f}s). "
+            f"Use total_timesteps=64 + rollout_size=32 + n_epochs=1 in tests."
+        )
+        for key in ("mean_reward", "policy_loss", "value_loss", "entropy"):
+            v = stats[key]
+            assert isinstance(v, (int, float)), (
+                f"stats[{key!r}] must be a number, got {type(v).__name__}"
+            )
+            assert not math.isnan(float(v)), f"stats[{key!r}] is NaN"
+    finally:
+        env.close()
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
