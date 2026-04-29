@@ -349,10 +349,16 @@ def test_step_5() -> None:
     import time
 
     import gymnasium as gym
+    from gymnasium.vector import AutoresetMode
 
     from ppo import PPOAgent
 
-    env = gym.make("MountainCarContinuous-v0")
+    env = gym.make_vec(
+        "MountainCarContinuous-v0",
+        num_envs=2,
+        vectorization_mode="sync",
+        vector_kwargs={"autoreset_mode": AutoresetMode.SAME_STEP},
+    )
     try:
         agent = PPOAgent(
             env,

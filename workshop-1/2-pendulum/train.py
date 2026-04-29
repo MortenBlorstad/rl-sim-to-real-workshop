@@ -28,13 +28,14 @@ import sys
 from pathlib import Path
 
 import gymnasium as gym
+from gymnasium.vector import AutoresetMode
 
 _HERE = Path(__file__).resolve().parent
 _WORKSHOP1 = _HERE.parent
 sys.path.insert(0, str(_WORKSHOP1 / "1-ppo"))
 
-from ppo import PPOAgent  
-from ppo.utils import (  
+from ppo import PPOAgent
+from ppo.utils import (
     RunDirectoryExistsError,
     RunLogger,
     make_log_fn,
@@ -45,6 +46,7 @@ from ppo.utils import (
 DEFAULT_TIMESTEPS = 200_000
 ENV_ID = "Pendulum-v1"
 STAGE = "pendulum"
+NUM_ENVS = 4
 
 hyperparameters: dict = {
     "rollout_size": 2048,
@@ -87,8 +89,13 @@ def main() -> int:
     seed = int(hyperparameters["random_state"])
     seed_everything(seed)
 
-    env = gym.make(ENV_ID)
-    env = ObsToState(env)
+    env = gym.make_vec(
+        ENV_ID,
+        num_envs=NUM_ENVS,
+        vectorization_mode="sync",
+        wrappers=[ObsToState],
+        vector_kwargs={"autoreset_mode": AutoresetMode.SAME_STEP},
+    )
     agent = PPOAgent(env, hyperparameters=hyperparameters)
 
     runs_root = _WORKSHOP1.parent / "runs"

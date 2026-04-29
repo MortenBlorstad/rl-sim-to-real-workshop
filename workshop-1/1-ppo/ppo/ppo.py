@@ -59,16 +59,23 @@ class PPOAgent:
         self.device = get_device()
         seed_everything(self.hyperparameters.get("random_state", DEFAULT_SEED))
 
-        self.obs_dim = int(np.prod(env.observation_space.shape))
-        self.action_dim = int(np.prod(env.action_space.shape))
+        # The agent reads obs/action shapes from the *single* env spaces so
+        # construction works for both a vector env (used by train()) and a
+        # plain single env (used by predict()/load() at inference time on
+        # the Pi). Vector envs expose ``single_observation_space``; single
+        # envs expose ``observation_space`` directly.
+        single_obs_space = getattr(env, "single_observation_space", env.observation_space)
+        single_act_space = getattr(env, "single_action_space", env.action_space)
+        self.obs_dim = int(np.prod(single_obs_space.shape))
+        self.action_dim = int(np.prod(single_act_space.shape))
         self.action_min = torch.as_tensor(
-            env.action_space.low, dtype=torch.float32, device=self.device
+            single_act_space.low, dtype=torch.float32, device=self.device
         )
         self.action_max = torch.as_tensor(
-            env.action_space.high, dtype=torch.float32, device=self.device
+            single_act_space.high, dtype=torch.float32, device=self.device
         )
-        self.obs_min = env.observation_space.low
-        self.obs_max = env.observation_space.high
+        self.obs_min = single_obs_space.low
+        self.obs_max = single_obs_space.high
         self.actor = ActorNetwork(self.obs_dim, self.action_dim).to(self.device)
         self.critic = CriticNetwork(self.obs_dim).to(self.device)
         self.log_std = nn.Parameter(
@@ -250,7 +257,27 @@ class PPOAgent:
         value_coef = self.hyperparameters["value_coef"]
         entropy_coef = self.hyperparameters["entropy_coef"]
         max_grad_norm = self.hyperparameters["max_grad_norm"]
-       
+
+        # Vector env: amortise per-step inference cost across N parallel envs.
+        # Drivers construct a vector env via gym.make_vec(..., autoreset_mode=
+        # SAME_STEP), so when an env terminates/truncates the auto-reset
+        # happens within the same step and the pre-reset final obs is
+        # reported in info["final_obs"][i].
+        if not hasattr(env, "num_envs"):
+            raise ValueError(
+                "PPOAgent.train() requires a vector env (gymnasium.vector). "
+                "Construct one with gym.make_vec(env_id, num_envs=N, "
+                "vectorization_mode='sync', vector_kwargs={'autoreset_mode': "
+                "AutoresetMode.SAME_STEP}). For single-env inference use predict()."
+            )
+        num_envs = env.num_envs
+        if rollout_size % num_envs != 0:
+            raise ValueError(
+                f"rollout_size ({rollout_size}) must be divisible by num_envs "
+                f"({num_envs}); got remainder {rollout_size % num_envs}."
+            )
+        size_per_env = rollout_size // num_envs
+
         optimizer = torch.optim.Adam(
             list(self.actor.parameters()) + list(self.critic.parameters()) + [self.log_std],
             lr=lr,
@@ -263,58 +290,70 @@ class PPOAgent:
             lr_lambda=lambda step: 1.0 - step / n_updates,
         )
         # TODO: Initialize rollout buffer
-        buffer = RolloutBuffer(rollout_size, self.obs_dim, self.action_dim)
-        
+        buffer = RolloutBuffer(size_per_env, self.obs_dim, self.action_dim, num_envs=num_envs)
 
-        obs, _ = env.reset(seed=random_state)
+        obs, _ = env.reset(seed=random_state)  # (N, obs_dim)
         episode_returns: list[float] = []
-        current_return = 0.0
+        current_returns = np.zeros(num_envs, dtype=np.float32)
         timesteps = 0
         final_stats: dict = {}
 
         for update_idx in range(1, n_updates + 1):
             # ----- rollout collection -----
-            last_step_done = False
-            for _ in range(rollout_size):
+            for _ in range(size_per_env):
                 obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
                 with torch.no_grad():
                     action, log_prob = self.sample_action(obs_t, deterministic=False)
-                    value_t = self.critic(obs_t).item()
+                    value_t = self.critic(obs_t)  # (N,)
                 action_np = action.detach().cpu().numpy().astype(np.float32)
-                next_obs, reward, terminated, truncated, _ = env.step(action_np)
-                done = bool(terminated or truncated)
+                value_np = value_t.detach().cpu().numpy().astype(np.float32)
+                log_prob_np = log_prob.detach().cpu().numpy().astype(np.float32)
 
-                # Bootstrap through truncations (not terminations)
-                current_return += float(reward)
-                if truncated and not terminated:
-                    with torch.no_grad():
-                        terminal_value = self.critic(
-                            torch.as_tensor(next_obs, dtype=torch.float32, device=self.device)
-                        ).item()
-                    reward = reward + gamma * terminal_value
+                next_obs, reward, terminated, truncated, info = env.step(action_np)
+                reward = reward.astype(np.float32)
+                done = np.logical_or(terminated, truncated).astype(np.float32)
+
+                # Track per-env episode returns; store completed ones for logging.
+                current_returns += reward
+                done_mask = (terminated | truncated)
+                if done_mask.any():
+                    for i in np.where(done_mask)[0]:
+                        episode_returns.append(float(current_returns[i]))
+                        current_returns[i] = 0.0
+
+                # Bootstrap through truncations (not terminations). With
+                # SAME_STEP autoreset, env.step has already reset and
+                # next_obs[i] is the post-reset obs; the *true* final obs
+                # of the just-ended episode is in info["final_obs"][i].
+                trunc_only = truncated & (~terminated)
+                if trunc_only.any() and "final_obs" in info:
+                    final_obs_arr = info["final_obs"]
+                    mask = info.get("_final_obs", trunc_only)
+                    trunc_idxs = np.where(trunc_only & mask)[0]
+                    if len(trunc_idxs) > 0:
+                        final_stack = np.stack(
+                            [np.asarray(final_obs_arr[i], dtype=np.float32) for i in trunc_idxs]
+                        )
+                        with torch.no_grad():
+                            terminal_values = self.critic(
+                                torch.as_tensor(final_stack, dtype=torch.float32, device=self.device)
+                            ).detach().cpu().numpy()
+                        for k, i in enumerate(trunc_idxs):
+                            reward[i] = reward[i] + gamma * float(terminal_values[k])
 
                 ## TODO: add to buffer
-                buffer.add(obs, action_np, log_prob.item(), reward, done, value_t)
-                
-                
-                timesteps += 1
-                if done:
-                    episode_returns.append(current_return)
-                    current_return = 0.0
-                    obs, _ = env.reset()
-                    last_step_done = True
-                else:
-                    obs = next_obs
-                    last_step_done = False
+                buffer.add(obs, action_np, log_prob_np, reward, done, value_np)
 
-            # Bootstrap final value (zero if rollout ended on terminal step).
-            if last_step_done:
-                last_value = 0.0
-            else:
-                with torch.no_grad():
-                    last_value = self.critic(
-                        torch.as_tensor(obs, dtype=torch.float32, device=self.device)
-                    ).item()
+                timesteps += num_envs
+                obs = next_obs
+
+            # Bootstrap final value for envs that did NOT just terminate.
+            # (For envs that terminated on the last step, dones[T-1]=1 and
+            # the GAE recurrence already cuts the bootstrap.)
+            with torch.no_grad():
+                last_value = self.critic(
+                    torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+                ).detach().cpu().numpy().astype(np.float32)
 
             #TODO: compute returns and advantages in buffer
             buffer.compute_returns_and_advantages(last_value, gamma, gae_lambda)
@@ -355,7 +394,9 @@ class PPOAgent:
             
 
             mean_return = (
-                float(np.mean(episode_returns[-10:])) if episode_returns else current_return
+                float(np.mean(episode_returns[-10:]))
+                if episode_returns
+                else float(current_returns.mean())
             )
             log_fn(
                 format_update_line(
