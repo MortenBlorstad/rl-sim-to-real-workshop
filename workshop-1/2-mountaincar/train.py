@@ -1,24 +1,25 @@
 """MountainCarContinuous-v0 — custom-PPO training driver.
 
 Writes ``runs/mountaincar/<run-name>/{meta.json, metrics.jsonl, model.pt,
-eval.mp4}`` per
-``specs/002-training-and-visualization/contracts/run-format.md``.
+eval.mp4}``.
 
-The driver is a thin wrapper around the stage-1 ``ppo.train()`` function:
+Thin wrapper around the stage-1 ``PPOAgent.train()`` and ``PPOAgent.evaluate()``:
 
-  1. Build env + agent.
+  1. Build env (with the ``NormalizeObs`` driver-level wrapper) and agent.
   2. Open a ``RunLogger`` (writes meta.json, opens metrics.jsonl).
-  3. Call ``ppo.train(...)`` with a custom ``log_fn`` that parses the
-     formatted log line and emits one JSONL record per PPO update via the
-     RunLogger.
-  4. Run one greedy evaluation episode with video recording.
-  5. Save model.
+  3. Call ``agent.train(...)`` with a ``log_fn`` that parses each formatted
+     log line into a JSONL record via the RunLogger.
+  4. ``agent.save(<run-dir>/model.pt)``.
+  5. Unless ``--no-eval``: ``agent.evaluate(env, n_episodes=1, record_video=True,
+     video_dir=<run-dir>)`` → ``eval.mp4``.
 
 Usage::
 
     uv run python workshop-1/2-mountaincar/train.py
-    uv run python workshop-1/2-mountaincar/train.py --timesteps 100000 --seed 7
-    uv run python workshop-1/2-mountaincar/train.py --no-eval --run-name foo
+    uv run python workshop-1/2-mountaincar/train.py --timesteps 4096 --run-name smoke --force
+
+The seed is configured in source via ``hyperparameters["random_state"]``;
+there is intentionally no ``--seed`` CLI flag.
 """
 from __future__ import annotations
 
@@ -27,24 +28,50 @@ import sys
 from pathlib import Path
 
 import gymnasium as gym
-import numpy as np
 
 _HERE = Path(__file__).resolve().parent
 _WORKSHOP1 = _HERE.parent
-sys.path.insert(0, str(_HERE))           # for agent.py
-sys.path.insert(0, str(_WORKSHOP1))      # for _runlog, _eval, _log_parser
-sys.path.insert(0, str(_WORKSHOP1 / "1-ppo"))  # for ppo
+sys.path.insert(0, str(_WORKSHOP1 / "1-ppo"))
 
-from agent import MountainCarPPOAgent  
-from _runlog import RunLogger, RunDirectoryExistsError  
-from _eval import record_eval_episode  
-from _log_parser import make_log_fn  
-from ppo import _seed_everything  
+from ppo import PPOAgent  # noqa: E402
+from ppo.utils import (  # noqa: E402
+    RunDirectoryExistsError,
+    RunLogger,
+    make_log_fn,
+    seed_everything,
+)
+
 
 DEFAULT_TIMESTEPS = 200_000
-DEFAULT_SEED = 42
 ENV_ID = "MountainCarContinuous-v0"
 STAGE = "mountaincar"
+
+hyperparameters: dict = {
+    "rollout_size": 2048,
+    "n_epochs": 10,
+    "batch_size": 64,
+    "lr": 1e-3,
+    "gamma": 0.98,
+    "gae_lambda": 0.95,
+    "clip_eps": 0.2,
+    "value_coef": 0.5,
+    "entropy_coef": 0.01,
+    "max_grad_norm": 0.5,
+    "log_std_init": 0.0,
+    "random_state": 42,
+}
+
+
+class NormalizeObs(gym.ObservationWrapper):
+    """Min-max normalize observations to ``[0, 1]`` using the env's bounds."""
+
+    def __init__(self, env: gym.Env):
+        super().__init__(env)
+        self.obs_low = self.observation_space.low
+        self.obs_high = self.observation_space.high
+
+    def observation(self, obs):
+        return (obs - self.obs_low) / (self.obs_high - self.obs_low)
 
 
 def main() -> int:
@@ -52,55 +79,70 @@ def main() -> int:
         description=f"Custom PPO trainer for {ENV_ID}"
     )
     parser.add_argument("--timesteps", type=int, default=DEFAULT_TIMESTEPS)
-    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--no-eval", action="store_true")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
-    _seed_everything(args.seed)
+    seed = int(hyperparameters["random_state"])
+    seed_everything(seed)
+
     env = gym.make(ENV_ID)
-    obs_dim = int(np.prod(env.observation_space.shape))
-    action_dim = int(np.prod(env.action_space.shape))
-    agent = MountainCarPPOAgent(env)
+    env = NormalizeObs(env)
+    agent = PPOAgent(env, hyperparameters=hyperparameters)
 
     runs_root = _WORKSHOP1.parent / "runs"
-    
-    runlog = RunLogger(
+    try:
+        runlog = RunLogger(
             stage=STAGE,
-            hyperparameters=agent.hyperparameters,
+            hyperparameters=hyperparameters,
             env_id=ENV_ID,
             agent_class=type(agent).__name__,
-            seed=args.seed,
+            seed=seed,
             total_timesteps=args.timesteps,
             run_name=args.run_name,
             force=args.force,
             runs_root=runs_root,
         )
-    
+    except RunDirectoryExistsError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        env.close()
+        return 1
 
     exit_code = 0
-    print(agent.hyperparameters)
-    print(f"action bounds: {agent.action_min} to {agent.action_max}")
-    print(f"log_std init: {agent.log_std.data}")
-    with runlog:
-        log_fn = make_log_fn(runlog, agent)
-        agent.train(
-            env,
-            total_timesteps=args.timesteps,
-            log_fn=log_fn,
-        )
-        agent.save(str(runlog.run_dir / "model.pt"))
-        if not args.no_eval:
-            record_eval_episode(
-                ENV_ID,
-                agent.predict,
-                runlog.run_dir,
-                seed=args.seed,
+    try:
+        with runlog:
+            log_fn = make_log_fn(runlog, agent)
+            agent.train(
+                env,
+                total_timesteps=args.timesteps,
+                random_state=seed,
+                log_fn=log_fn,
+            )
+            agent.save(str(runlog.run_dir / "model.pt"))
+            if not args.no_eval:
+                agent.evaluate(
+                    env,
+                    n_episodes=1,
+                    record_video=True,
+                    video_dir=runlog.run_dir,
                 )
-    
-    
-    env.close()
+    except KeyboardInterrupt:
+        print("\n[train] interrupted by user", file=sys.stderr)
+        exit_code = 130
+    except NotImplementedError as exc:
+        print(
+            "[train] Looks like a TODO is still raising NotImplementedError. "
+            "Fill it in and re-run.",
+            file=sys.stderr,
+        )
+        print(f"[train] underlying error: {exc}", file=sys.stderr)
+        exit_code = 3
+    except Exception as exc:
+        print(f"[train] error: {exc!r}", file=sys.stderr)
+        exit_code = 2
+    finally:
+        env.close()
 
     return exit_code
 

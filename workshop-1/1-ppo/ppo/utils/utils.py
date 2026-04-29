@@ -36,8 +36,8 @@ def format_update_line(
     """
     return (
         f"[update {update_idx:2d}/{n_updates}] "
-        f"timesteps={timesteps:6d}  "
-        f"lr={lr:.3e}  " 
+        f"timesteps={timesteps:<6d}  "
+        f"lr={lr:.3e}  "
         f"policy_loss={policy_loss:+.3f}  "
         f"value_loss={value_loss:+.3f}  "
         f"entropy={entropy:+.3f}  "

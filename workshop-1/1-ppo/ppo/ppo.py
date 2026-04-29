@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import argparse
-import math
-import random
 import sys
-from typing import Iterator
+from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
@@ -56,24 +53,28 @@ class PPOAgent:
         hyperparameters: dict | None = None,
     ):
         self.env = env
-        self.obs_dim = int(np.prod(env.observation_space.shape))
-        self.action_dim = int(np.prod(env.action_space.shape))
-        self.action_min = torch.as_tensor(env.action_space.low, dtype=torch.float32)
-        self.action_max = torch.as_tensor(env.action_space.high, dtype=torch.float32)
-        self.obs_min = env.observation_space.low
-        self.obs_max = env.observation_space.high
-
         self.hyperparameters = dict(self.DEFAULT_HYPERPARAMS)
         if hyperparameters:
             self.hyperparameters.update(hyperparameters)
         self.device = get_device()
         seed_everything(self.hyperparameters.get("random_state", DEFAULT_SEED))
-        self.actor = ActorNetwork(self.obs_dim, self.action_dim)
-        self.critic = CriticNetwork(self.obs_dim)
-        self.log_std = nn.Parameter(torch.ones(self.action_dim)*self.hyperparameters["log_std_init"], device=self.device)
-        
-        self.actor.to(self.device)
-        self.critic.to(self.device)
+
+        self.obs_dim = int(np.prod(env.observation_space.shape))
+        self.action_dim = int(np.prod(env.action_space.shape))
+        self.action_min = torch.as_tensor(
+            env.action_space.low, dtype=torch.float32, device=self.device
+        )
+        self.action_max = torch.as_tensor(
+            env.action_space.high, dtype=torch.float32, device=self.device
+        )
+        self.obs_min = env.observation_space.low
+        self.obs_max = env.observation_space.high
+        self.actor = ActorNetwork(self.obs_dim, self.action_dim).to(self.device)
+        self.critic = CriticNetwork(self.obs_dim).to(self.device)
+        self.log_std = nn.Parameter(
+            torch.ones(self.action_dim, device=self.device)
+            * self.hyperparameters["log_std_init"]
+        )
 
     # ===========================================================================
     # TODO 2 — Sample an action from the policy
@@ -119,31 +120,29 @@ class PPOAgent:
     #============================================================================
     def evaluate_actions(
         self,
-        actor: ActorNetwork,
         obs: torch.Tensor,
         actions: torch.Tensor,
-        log_std: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Evaluate a batch of ``(obs, action)`` under the current policy.
 
+        Uses ``self.actor`` and ``self.log_std`` internally.
+
         Args:
-            actor:    ActorNetwork.
             obs:      shape ``(B, obs_dim)``.
             actions:  shape ``(B, action_dim)``.
-            log_std:  shape ``(action_dim,)``.
 
         Returns:
             ``(log_probs, entropy)``, both of shape ``(B,)``.
 
         Hints:
-            1. mean      = actor(obs)
-            2. dist      = Normal(mean, log_std.exp())
+            1. mean      = self.actor(obs)
+            2. dist      = Normal(mean, self.log_std.exp())
             3. log_probs = dist.log_prob(actions).sum(dim=-1)
             4. entropy   = dist.entropy().sum(dim=-1)
         """
         # -- YOUR CODE HERE --
         mean = self.actor(obs)
-        dist = Normal(mean, log_std.exp())
+        dist = Normal(mean, self.log_std.exp())
         log_probs = dist.log_prob(actions).sum(dim=-1)
         entropy = dist.entropy().sum(dim=-1)
         return log_probs, entropy
@@ -253,8 +252,9 @@ class PPOAgent:
         max_grad_norm = self.hyperparameters["max_grad_norm"]
        
         optimizer = torch.optim.Adam(
-            list(self.actor.parameters()) + list(self.value.parameters()) + [self.log_std],
-            lr=lr,eps=1e-5
+            list(self.actor.parameters()) + list(self.critic.parameters()) + [self.log_std],
+            lr=lr,
+            eps=1e-5,
         )
         n_updates = max(1, total_timesteps // rollout_size)
 
@@ -266,7 +266,7 @@ class PPOAgent:
         buffer = RolloutBuffer(rollout_size, self.obs_dim, self.action_dim)
         
 
-        obs, _ = env.reset(seed=torch.seed)
+        obs, _ = env.reset(seed=random_state)
         episode_returns: list[float] = []
         current_return = 0.0
         timesteps = 0
@@ -276,10 +276,10 @@ class PPOAgent:
             # ----- rollout collection -----
             last_step_done = False
             for _ in range(rollout_size):
-                obs_t = torch.as_tensor(obs, dtype=torch.float32)
+                obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
                 with torch.no_grad():
-                    action, log_prob = self.sample_action(self.actor, obs_t, self.log_std, deterministic=False)
-                    value_t = self.value(obs_t).item()
+                    action, log_prob = self.sample_action(obs_t, deterministic=False)
+                    value_t = self.critic(obs_t).item()
                 action_np = action.detach().cpu().numpy().astype(np.float32)
                 next_obs, reward, terminated, truncated, _ = env.step(action_np)
                 done = bool(terminated or truncated)
@@ -288,7 +288,9 @@ class PPOAgent:
                 current_return += float(reward)
                 if truncated and not terminated:
                     with torch.no_grad():
-                        terminal_value = self.critic(torch.as_tensor(next_obs, dtype=torch.float32)).item()
+                        terminal_value = self.critic(
+                            torch.as_tensor(next_obs, dtype=torch.float32, device=self.device)
+                        ).item()
                     reward = reward + gamma * terminal_value
 
                 ## TODO: add to buffer
@@ -310,7 +312,9 @@ class PPOAgent:
                 last_value = 0.0
             else:
                 with torch.no_grad():
-                    last_value = self.critic(torch.as_tensor(obs, dtype=torch.float32)).item()
+                    last_value = self.critic(
+                        torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+                    ).item()
 
             #TODO: compute returns and advantages in buffer
             buffer.compute_returns_and_advantages(last_value, gamma, gae_lambda)
@@ -321,6 +325,7 @@ class PPOAgent:
             last_entropy = 0.0
             for _ in range(n_epochs):
                 for batch in buffer.get_batches(batch_size):
+                    batch = {k: v.to(self.device) for k, v in batch.items()}
                     # TODO: compute PPO policy loss, value loss, and combine with entropy bonus into a single scalar loss
                     # Hint: Use evaluate_actions to get the `new_log_probs` and `entropy`.
                     #       Use self.ppo_loss() to get the actor loss and F.mse_loss() for the critic loss.
@@ -375,14 +380,107 @@ class PPOAgent:
         # -- END YOUR CODE --
 
     def predict(self, obs: np.ndarray, deterministic: bool = False) -> np.ndarray:
-        """Take a observation, return an action.
+        """Take a raw observation (NumPy), return an action (NumPy).
+
+        Converts to a tensor on ``self.device`` at the boundary so callers
+        never touch torch.
         """
+        obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
         with torch.no_grad():
-            action, _ = self.sample_action(
-                obs,
-                deterministic=deterministic,
-            )
+            action, _ = self.sample_action(obs_t, deterministic=deterministic)
         return action.cpu().numpy().astype(np.float32)
+    
+    def evaluate(
+        self,
+        env: gym.Env,
+        n_episodes: int = 10,
+        record_video: bool = True,
+        video_dir: str | Path | None = None,
+    ) -> list[float]:
+        """Run greedy evaluation episodes; optionally record one video.
+
+        Args:
+            env:           the env used to derive ``env_id`` (for the video env).
+                           Per-step rollouts use a fresh env so the recorder
+                           can wrap it cleanly without disturbing the caller's
+                           env.
+            n_episodes:    number of greedy episodes.
+            record_video:  if True, wrap a fresh env in
+                           ``gymnasium.wrappers.RecordVideo`` and produce
+                           ``<video_dir>/eval.mp4``.
+            video_dir:     directory for the video. Defaults to the current
+                           working directory; the driver always passes the
+                           run directory.
+
+        Returns:
+            List of per-episode total returns (length ``n_episodes``).
+
+        Notes:
+            - On ``ImportError`` /
+              ``gymnasium.error.DependencyNotInstalled`` (ffmpeg missing),
+              writes a sentinel ``eval.mp4.skipped`` and returns the
+              episode returns without a video.
+            - Uses ``predict(obs, deterministic=True)`` for the policy.
+        """
+        env_id = env.spec.id if env.spec is not None else None
+        if env_id is None:
+            raise ValueError(
+                "evaluate() needs env.spec.id to construct the recording env. "
+                "Pass an env created via gym.make(...)."
+            )
+        video_dir = Path(video_dir) if video_dir is not None else Path.cwd()
+
+        if record_video:
+            video_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                eval_env = gym.make(env_id, render_mode="rgb_array")
+                eval_env = gym.wrappers.RecordVideo(
+                    eval_env,
+                    video_folder=str(video_dir),
+                    name_prefix="eval",
+                    episode_trigger=lambda episode_id: episode_id == 0,
+                )
+            except (
+                ImportError,
+                gym.error.DependencyNotInstalled,
+            ) as exc:
+                print(
+                    f"[ppo.evaluate] ffmpeg/imageio missing ({exc!r}); "
+                    f"writing eval.mp4.skipped and continuing without video.",
+                    file=sys.stderr,
+                )
+                (video_dir / "eval.mp4.skipped").write_text("")
+                eval_env = gym.make(env_id)
+                record_video = False
+        else:
+            eval_env = gym.make(env_id)
+
+        returns: list[float] = []
+        try:
+            for _ in range(n_episodes):
+                obs, _ = eval_env.reset()
+                ep_return = 0.0
+                done = False
+                while not done:
+                    action = self.predict(obs, deterministic=True)
+                    obs, reward, terminated, truncated, _ = eval_env.step(action)
+                    ep_return += float(reward)
+                    done = bool(terminated or truncated)
+                returns.append(ep_return)
+        finally:
+            eval_env.close()
+
+        # RecordVideo names the file ``eval-episode-0.mp4``; rename to the
+        # contract-mandated ``eval.mp4`` so analyze.ipynb finds it.
+        if record_video:
+            produced = video_dir / "eval-episode-0.mp4"
+            target = video_dir / "eval.mp4"
+            if produced.exists():
+                if target.exists():
+                    target.unlink()
+                produced.rename(target)
+
+        return returns
     
     def save(self, path: str) -> None:
         """Persist model weights, hyperparameters, and preprocess state."""
@@ -396,8 +494,13 @@ class PPOAgent:
         torch.save(state, path)
 
     @classmethod
-    def load(cls, path: str) -> "PPOAgent":
-        """Load any registered subclass by class name from a single ``.pt``."""
+    def load(cls, path: str, env: gym.Env) -> "PPOAgent":
+        """Load any registered subclass by class name from a single ``.pt``.
+
+        The ``env`` argument is required so the loaded agent can reconstruct
+        ``obs_dim`` / ``action_dim`` / action bounds. Pass the same (wrapped)
+        env you would use for training or evaluation.
+        """
         state = torch.load(path, weights_only=False)
         class_name = state["class_name"]
         if class_name not in _AGENT_REGISTRY:
@@ -407,11 +510,12 @@ class PPOAgent:
                 f"is imported before calling PPOAgent.load()."
             )
         target_cls = _AGENT_REGISTRY[class_name]
-        agent = target_cls(
-            hyperparameters=state["hyperparameters"],
-        )
+        agent = target_cls(env, hyperparameters=state["hyperparameters"])
         agent.actor.load_state_dict(state["actor_state_dict"])
         agent.critic.load_state_dict(state["value_state_dict"])
         with torch.no_grad():
             agent.log_std.copy_(state["log_std"])
         return agent
+    
+
+    
