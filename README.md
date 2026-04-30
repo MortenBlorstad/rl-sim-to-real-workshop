@@ -63,6 +63,7 @@ On Windows, reopen the terminal before running `swig -version`. If it is not rec
 ```bash
 git clone https://github.com/<your-username>/rl-sim-to-real-workshop.git
 cd rl-sim-to-real-workshop
+git checkout -b <your-name>
 ```
 
 ### 3. Install dependencies
@@ -84,6 +85,7 @@ uv run python workshop-1/0-warmup/cartpole_random.py
 ```
 
 You should see a CartPole window with a pole falling left and right. If it works, you are ready.
+
 
 ## Repo structure
 
@@ -113,3 +115,5 @@ You should see a CartPole window with a pole falling left and right. If it works
 - [DonkeyCar docs](https://docs.donkeycar.com)
 - [gym-donkeycar](https://github.com/tawnkramer/gym-donkeycar)
 - [Learning to Drive in 5 Minutes (VAE+PPO)](https://github.com/araffin/learning-to-drive-in-5-minutes)
+
+

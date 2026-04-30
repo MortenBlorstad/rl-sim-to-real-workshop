@@ -144,26 +144,48 @@ class PPOAgent:
     def sample_action(self, obs: torch.Tensor, deterministic: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
         """Sample an action from the policy and return ``(action, log_prob)``.
 
+        Uses ``self.actor`` (obs → action mean) and ``self.log_std``
+        (per-action-dim learnable log std-dev). Action range comes from
+        ``self.action_min`` / ``self.action_max``.
+
         Args:
-            actor:         ActorNetwork that maps obs -> action mean.
             obs:           shape ``(obs_dim,)`` for a single observation, or
-                        ``(B, obs_dim)`` batched.
-            log_std:       shape ``(action_dim,)``, learnable log std-dev.
-            deterministic: if True, return the policy mean (no sampling).
+                           ``(B, obs_dim)`` batched. CHW pixel obs of shape
+                           ``(C, H, W)`` / ``(B, C, H, W)`` also work — the
+                           actor handles its own input shape.
+            deterministic: if ``True``, return the policy mean (no sampling).
 
         Returns:
-            action:   clipped to ``[-1, 1]``. Shape matches obs's leading dim.
-            log_prob: log-prob of the UNCLIPPED sample, summed over action dims.
+            action:   clipped to ``[self.action_min, self.action_max]``.
+                      Same shape as the actor's mean output.
+            log_prob: shape ``(B,)`` (or scalar for unbatched input). Log-prob
+                      of the UNCLIPPED sample, summed over action dims.
 
-        Hints:
-            1. mean = actor(obs)
-            2. dist = torch.distributions.Normal(mean, log_std.exp())
-            3. unclipped = mean if deterministic else dist.sample()
-            4. log_prob  = dist.log_prob(unclipped).sum(dim=-1)
-            5. action    = unclipped.clamp(action_low, action_high)
+        Math:
+            π(a | s) = N(mean=actor(s), std=exp(log_std))
+            log π(a | s) = sum_i log N_i(a_i | mean_i, std_i)
 
-        Important: log_prob is computed on the UNCLIPPED sample. Clipping
-        only the returned action keeps the gradient honest.
+        Steps (pseudo-code):
+            1. ``mean = self.actor(obs)``
+            2. ``dist = torch.distributions.Normal(mean, self.log_std.exp())``
+            3. ``unclipped = mean if deterministic else dist.sample()``
+            4. ``log_prob = dist.log_prob(unclipped).sum(dim=-1)``
+            5. ``action = unclipped.clamp(self.action_min, self.action_max)``
+            6. Return ``(action, log_prob)``.
+
+        Gotchas:
+            * ``log_prob`` MUST be computed on the **unclipped** sample.
+              Clipping only the returned action keeps the gradient honest;
+              clipping before log-prob would assign zero gradient to
+              boundary-clipped actions.
+            * Sum over the **last** dim (``dim=-1``) so a multi-dim action
+              produces ONE log-prob per sample. ``log_prob.sum()`` (no axis)
+              would collapse the batch dim too and break the per-batch loss.
+            * ``self.log_std.exp()`` not ``self.log_std`` directly — the
+              learnable parameter is in log-space for unconstrained gradients.
+            * ``Normal.sample()`` does not back-propagate. That's intended at
+              rollout time; gradients flow through ``log_prob`` in
+              ``evaluate_actions`` during the update phase.
         """
         # -- YOUR CODE HERE --
         mean = self.actor(obs)
@@ -187,20 +209,47 @@ class PPOAgent:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Evaluate a batch of ``(obs, action)`` under the current policy.
 
+        Used inside the PPO update phase: actions sampled at rollout time are
+        re-scored under the *current* policy network so we can compute the
+        importance ratio and the entropy bonus.
+
         Uses ``self.actor`` and ``self.log_std`` internally.
 
         Args:
-            obs:      shape ``(B, obs_dim)``.
-            actions:  shape ``(B, action_dim)``.
+            obs:      shape ``(B, obs_dim)`` (or ``(B, C, H, W)`` for pixel
+                      observations — the actor handles its own input shape).
+            actions:  shape ``(B, action_dim)``. These are the actions
+                      collected during rollout (post-clip values) — that's
+                      fine: log-prob under a Normal is well-defined inside
+                      and outside the clip range.
 
         Returns:
-            ``(log_probs, entropy)``, both of shape ``(B,)``.
+            log_probs: shape ``(B,)``. Per-sample log-prob, summed over
+                       action dims.
+            entropy:   shape ``(B,)``. Per-sample policy entropy, summed
+                       over action dims.
 
-        Hints:
-            1. mean      = self.actor(obs)
-            2. dist      = Normal(mean, self.log_std.exp())
-            3. log_probs = dist.log_prob(actions).sum(dim=-1)
-            4. entropy   = dist.entropy().sum(dim=-1)
+        Math:
+            log π_new(a | s) = sum_i log N_i(a_i | mean_i, std_i)
+            H[π_new(· | s)]  = sum_i H[N_i(mean_i, std_i)]
+            (Gaussian entropy: 0.5 * log(2 * π * e * std²) per dim.)
+
+        Steps (pseudo-code):
+            1. ``mean = self.actor(obs)``
+            2. ``dist = Normal(mean, self.log_std.exp())``
+            3. ``log_probs = dist.log_prob(actions).sum(dim=-1)``
+            4. ``entropy   = dist.entropy().sum(dim=-1)``
+            5. Return ``(log_probs, entropy)``.
+
+        Gotchas:
+            * Action-dim summation MUST match ``sample_action`` (also
+              ``sum(dim=-1)``). If TODO 2 sums and TODO 3 doesn't (or vice
+              versa), the importance ratio in TODO 4 will be off by a factor
+              of ``action_dim`` and training silently diverges.
+            * ``log_probs`` here CARRIES gradient through ``self.actor`` /
+              ``self.log_std``; that gradient is what PPO's policy loss
+              optimises. Do not call ``.detach()``.
+            * ``self.log_std.exp()`` (same as TODO 2) — log-space parameter.
         """
         # -- YOUR CODE HERE --
         mean = self.actor(obs)
@@ -224,23 +273,49 @@ class PPOAgent:
         """PPO clipped surrogate objective. Returns the POLICY loss only.
 
         The training loop combines this with the value loss (MSE) and an
-        entropy bonus.
+        entropy bonus into a single scalar to back-prop.
 
         Args:
-            new_log_probs: shape ``(B,)``, log-probs under the CURRENT policy.
-                        Carries gradient.
-            old_log_probs: shape ``(B,)``, log-probs at rollout time. No grad.
-            advantages:    shape ``(B,)``, normalized to mean 0, std 1.
-            clip_eps:      clip range epsilon (typically 0.2).
+            new_log_probs: shape ``(B,)``. Log-probs under the CURRENT policy
+                           (from TODO 3). Carries gradient.
+            old_log_probs: shape ``(B,)``. Log-probs captured at rollout time.
+                           Detached — no gradient flows through this.
+            advantages:    shape ``(B,)``. Buffer-normalised to mean 0, std 1
+                           by ``RolloutBuffer.compute_returns_and_advantages``.
+            clip_eps:      clip-range epsilon. Typically ``0.2``.
 
         Returns:
-            Scalar tensor: ``-mean(min(ratio * adv, clip(ratio, 1-eps, 1+eps) * adv))``.
+            Scalar tensor (zero-dim) with ``requires_grad=True``. Negative
+            because the surrogate is maximised but PyTorch optimisers
+            minimise.
 
-        Hints:
-            ratio = (new_log_probs - old_log_probs).exp()
-            surr1 = ratio * advantages
-            surr2 = ratio.clamp(1 - clip_eps, 1 + clip_eps) * advantages
-            loss  = -torch.min(surr1, surr2).mean()
+        Math:
+            r_t   = exp(log π_new(a_t|s_t) - log π_old(a_t|s_t))
+            surr1 = r_t * A_t
+            surr2 = clip(r_t, 1-ε, 1+ε) * A_t
+            L     = -E_t[ min(surr1, surr2) ]
+
+        Steps (pseudo-code):
+            1. ``ratio = (new_log_probs - old_log_probs).exp()``
+            2. ``surr1 = ratio * advantages``
+            3. ``surr2 = ratio.clamp(1.0 - clip_eps, 1.0 + clip_eps) * advantages``
+            4. ``loss  = -torch.min(surr1, surr2).mean()``
+            5. Return ``loss``.
+
+        Gotchas:
+            * ``min`` not ``max``: PPO clips the *surrogate*, then takes the
+              MIN to be conservative (pessimistic over both branches), then
+              negates because we minimise.
+            * ``ratio.clamp(...)`` clamps the multiplier, not the loss.
+              Clamping ``surr1`` directly is wrong — it breaks the
+              "clip the ratio" semantics.
+            * ``advantages`` should already be normalised (zero mean, unit
+              std). Don't re-normalise here.
+            * ``new_log_probs - old_log_probs`` not the other way round.
+              Sign flip silently destroys learning.
+            * Returns the **policy loss only**. The training loop adds
+              ``value_coef * value_loss - entropy_coef * entropy.mean()``.
+              Don't fold those into this function.
         """
         # -- YOUR CODE HERE --
         ratio = (new_log_probs - old_log_probs).exp()
@@ -261,45 +336,79 @@ class PPOAgent:
     ) -> dict:
         """Wire everything together into a working PPO training loop.
 
-        Sketch:
+        The rollout, bootstrapping, vectorised env handling, optimiser, and
+        learning-rate schedule are PROVIDED. You only fill three small
+        spots — TODO 5a, 5b, 5c — that connect the building blocks (TODOs
+        1–4) into a working loop.
 
-        1. Re-seed (random / np / torch / env) with ``seed``.
-        2. Build an ``Adam`` optimizer over
-        ``list(actor.parameters()) + list(value.parameters()) + [log_std]``.
-        3. Build a ``RolloutBuffer(rollout_size, obs_dim, action_dim)``.
-        4. Loop until ``total_timesteps`` env steps have been collected:
-            a. Roll out ``rollout_size`` transitions:
-                - ``action, log_prob = sample_action(actor, obs_t, log_std)``
-                - ``value_t = value(obs_t).item()``
-                - ``next_obs, reward, terminated, truncated, _ = env.step(action.numpy())``
-                - ``done = terminated or truncated``
-                - ``buffer.add(obs, action.numpy(), log_prob.item(), reward, done, value_t)``
-                - on done: ``next_obs, _ = env.reset()``; track episode return.
-            b. Bootstrap: ``last_value = value(last_obs).item()`` (or ``0.0`` if
-            the rollout ended on a terminal step).
-            c. ``buffer.compute_returns_and_advantages(last_value, gamma, gae_lambda)``
-            d. For ``n_epochs`` epochs, iterate ``buffer.get_batches(batch_size)``:
-                - ``new_log_probs, ent = evaluate_actions(actor, batch["obs"], batch["actions"], log_std)``
-                - ``pred_values = value(batch["obs"])``
-                - ``p_loss = ppo_loss(new_log_probs, batch["old_log_probs"], batch["advantages"], clip_eps)``
-                - ``v_loss = F.mse_loss(pred_values, batch["returns"])``
-                - ``loss = p_loss + value_coef * v_loss - entropy_coef * ent.mean()``
-                - ``optimizer.zero_grad(); loss.backward()``
-                - ``torch.nn.utils.clip_grad_norm_(parameters, max_grad_norm)``
-                - ``optimizer.step()``
-            e. Print one line per iteration via:
-            ``log_fn(format_update_line(update_idx, n_updates, timesteps, p_loss.item(), v_loss.item(), ent.mean().item(), mean_return))``
-            f. ``buffer.reset()``
+        Args:
+            env:             a ``gymnasium.vector.VectorEnv`` constructed with
+                             ``gym.make_vec(env_id, num_envs=N,
+                             vectorization_mode='sync',
+                             vector_kwargs={'autoreset_mode':
+                             AutoresetMode.SAME_STEP})``. ``rollout_size``
+                             must be divisible by ``num_envs``.
+            total_timesteps: target env-step budget. The actual number of
+                             updates is ``max(1, total_timesteps //
+                             rollout_size)``.
+            random_state:    seed for ``random / numpy / torch`` (the env is
+                             seeded inside via ``env.reset(seed=...)``).
+            log_fn:          callable receiving one formatted log line per
+                             update. Defaults to ``print``; drivers pass a
+                             closure that also writes to ``metrics.jsonl``.
 
         Returns:
-            Dict with at minimum: ``mean_reward``, ``policy_loss``,
-            ``value_loss``, ``entropy``, ``n_updates``.
+            Dict with keys ``mean_reward``, ``policy_loss``, ``value_loss``,
+            ``entropy``, ``n_updates`` (last-update statistics).
 
-        Note:
-            Use ``format_update_line(...)`` for the printed line so the
-            ``__main__`` runner can parse loss values for its exit checks.
+        Math (one update step):
+            For each minibatch of size B drawn from the buffer:
+                ratio        = exp(log π_new - log π_old)               (TODO 4)
+                policy_loss  = -mean( min(ratio·A, clip(ratio, 1±ε)·A) )  (TODO 4)
+                value_loss   = mean( (V_θ(s) - returns)² )
+                loss         = policy_loss + c_v·value_loss - c_e·H[π_new]
+            ∇loss → Adam step → clip-grad-norm.
+
+        Steps (pseudo-code) — sub-TODOs:
+            (provided) collect a rollout of ``rollout_size`` transitions
+                       across ``num_envs`` parallel envs into ``buffer``.
+            (provided) compute the bootstrap ``last_value`` for the
+                       non-terminal envs.
+            5a:        compute returns and advantages on the buffer using
+                       the bootstrap value (one method call).
+            (provided) iterate ``n_epochs`` epochs × ``buffer.get_batches``
+                       minibatches. Each batch comes pre-shaped for SGD.
+            5b:        for each minibatch — call ``evaluate_actions``,
+                       compute ``p_loss`` (TODO 4), ``v_loss``
+                       (``F.mse_loss``), then combine the components into
+                       a single scalar ``loss`` (this is the line that
+                       carries the gradient). The surrounding scaffold
+                       handles ``optimizer.zero_grad`` → ``loss.backward``
+                       → ``clip_grad_norm`` → ``optimizer.step`` and the
+                       per-batch loss tracking for the log line.
+            (provided) emit one ``format_update_line`` log per update and
+                       step the LR scheduler.
+            5c:        reset the buffer for the next rollout (one call).
+
+        Gotchas:
+            * 5a — pass ``last_value`` (the bootstrap), ``gamma``, and
+              ``gae_lambda`` in that order. The buffer normalises advantages
+              internally; don't re-normalise.
+            * 5b — combine: ``loss = p_loss + value_coef * v_loss -
+              entropy_coef * entropy.mean()``. The minus sign on entropy is
+              deliberate — entropy is a bonus, not a cost.
+            * 5b — call ``entropy.mean()`` explicitly. ``entropy`` is shape
+              ``(B,)`` (one per sample); ``loss`` must be scalar for
+              ``backward()``.
+            * 5b — record ``last_p_loss / last_v_loss / last_entropy`` from
+              the LAST minibatch of the LAST epoch. The format_update_line
+              call below uses these.
+            * 5c — must run after the update phase but before the next
+              rollout starts, otherwise rollouts t and t+1 share storage
+              and the buffer overflows.
+            * Use ``format_update_line(...)`` for the per-update print so
+              the script-mode runner can parse losses.
         """
-        # -- YOUR CODE HERE --
         # Re-seed for reproducibility within a single train() call.
         seed_everything(random_state)
         lr = self.hyperparameters["lr"]
@@ -344,7 +453,6 @@ class PPOAgent:
             optimizer,
             lr_lambda=lambda step: 1.0 - step / n_updates,
         )
-        # TODO: Initialize rollout buffer
         # Store obs with their full shape so CNN batches can be reshaped
         # back to (B, C, H, W) for the conv forward. For MLP, this is just
         # (obs_dim,) and the existing flat layout is preserved.
@@ -449,8 +557,11 @@ class PPOAgent:
                     self._prep_obs(obs)
                 ).detach().cpu().numpy().astype(np.float32)
 
-            #TODO: compute returns and advantages in buffer
+            # ----- TODO 5a: compute returns and advantages -----
+            # See docstring section "5a". One method call on `buffer`.
+            # -- YOUR CODE HERE --
             buffer.compute_returns_and_advantages(last_value, gamma, gae_lambda)
+            # -- END YOUR CODE --
 
             # ----- update phase -----
             last_p_loss = 0.0
@@ -459,20 +570,32 @@ class PPOAgent:
             for _ in range(n_epochs):
                 for batch in buffer.get_batches(batch_size):
                     batch = {k: v.to(self.device) for k, v in batch.items()}
-                    # TODO: compute PPO policy loss, value loss, and combine with entropy bonus into a single scalar loss
-                    # Hint: Use evaluate_actions to get the `new_log_probs` and `entropy`.
-                    #       Use self.ppo_loss() to get the actor loss and F.mse_loss() for the critic loss.
-                    #       Use use actor, critic loss and entropy to compute the final loss.
+                    # ----- TODO 5b: compose the combined PPO loss -----
+                    # See docstring section "5b". For each minibatch:
+                    #   1. score the actions under the current policy
+                    #      (TODO 3 — self.evaluate_actions(obs, actions))
+                    #      → new_log_probs (B,) and entropy (B,)
+                    #   2. compute the critic's value estimate
+                    #      (self.critic(obs))
+                    #   3. compute the policy loss (TODO 4 — self.ppo_loss)
+                    #   4. compute the value loss
+                    #      (F.mse_loss(pred_values, batch["returns"]))
+                    #   5. combine into ONE scalar `loss`, subtracting the
+                    #      entropy bonus (entropy is a bonus, not a cost).
+                    # The scaffold below handles zero_grad → backward →
+                    # clip_grad_norm → optimizer.step. Just produce `loss`.
+                    # -- YOUR CODE HERE --
                     new_log_probs, entropy = self.evaluate_actions(
                         batch["obs"], batch["actions"],
                     )
                     pred_values = self.critic(batch["obs"])
-                   
+
                     p_loss = self.ppo_loss(
                         new_log_probs, batch["old_log_probs"], batch["advantages"], clip_eps,
                     )
                     v_loss = F.mse_loss(pred_values, batch["returns"])
                     loss = p_loss + value_coef * v_loss - entropy_coef * entropy.mean()
+                    # -- END YOUR CODE --
 
                     optimizer.zero_grad()
                     loss.backward()
@@ -485,7 +608,8 @@ class PPOAgent:
                     last_p_loss = float(p_loss.item())
                     last_v_loss = float(v_loss.item())
                     last_entropy = float(entropy.mean().item())
-            
+                   
+
 
             mean_return = (
                 float(np.mean(episode_returns[-10:]))
@@ -500,8 +624,11 @@ class PPOAgent:
             )
             scheduler.step()
 
-            #TODO: reset rollout buffer for next update
+            # ----- TODO 5c: reset rollout buffer for the next update -----
+            # See docstring section "5c". One method call on `buffer`.
+            # -- YOUR CODE HERE --
             buffer.reset()
+            # -- END YOUR CODE --
 
             final_stats = {
                 "mean_reward": mean_return,
@@ -512,7 +639,6 @@ class PPOAgent:
             }
 
         return final_stats
-        # -- END YOUR CODE --
 
     def predict(self, obs: np.ndarray, deterministic: bool = False) -> np.ndarray:
         """Take a raw observation (NumPy), return an action (NumPy).

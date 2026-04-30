@@ -75,25 +75,46 @@ class RolloutBuffer:
         Args:
             rewards: shape ``(T,)`` or ``(T, N)``, reward at each step.
             values:  shape ``(T+1,)`` or ``(T+1, N)``, state values including
-                     the bootstrapped final value at index ``T``.
+                     the bootstrapped final value at index ``T`` (the caller
+                     concatenates the bootstrap value as the last row).
             dones:   shape ``(T,)`` or ``(T, N)``, ``1.0`` if the episode
                      terminated AFTER step ``t``, else ``0.0``.
-            gamma:   discount factor.
-            lam:     GAE lambda.
+            gamma:   discount factor (e.g. ``0.99``).
+            lam:     GAE lambda (e.g. ``0.95``).
 
         Returns:
-            ``advantages`` of the same shape as ``rewards``.
+            ``advantages``: same shape as ``rewards``.
 
-        Hint — the recurrence:
+        Math/recurrence:
             delta_t = rewards[t] + gamma * values[t+1] * (1 - dones[t]) - values[t]
             gae_t   = delta_t + gamma * lam * (1 - dones[t]) * gae_{t+1}
             with gae_T = 0.
 
-        Iterate from ``t = T-1`` down to ``t = 0``. The ``(1 - dones[t])`` term
-        is what cuts the bootstrap at episode boundaries.
+        Steps (pseudo-code):
+            1. Allocate ``advantages`` with ``torch.zeros_like(rewards)``.
+            2. Initialise ``gae`` to a zero tensor matching one slice of
+               ``rewards`` (use ``rewards[0]`` so it broadcasts in the
+               vector-env case where rewards is ``(T, N)``).
+            3. Iterate ``t`` from ``T-1`` down to ``0``:
+               a. ``not_done = 1.0 - dones[t]``
+               b. ``delta = rewards[t] + gamma * values[t+1] * not_done - values[t]``
+               c. ``gae   = delta + gamma * lam * not_done * gae``
+               d. ``advantages[t] = gae``
+            4. Return ``advantages``.
+
+        Gotchas:
+            * Shape: in the vector-env case ``rewards`` is ``(T, N)`` and
+              ``values`` is ``(T+1, N)``. Index by ``[t]`` (not ``[:, t]``)
+              so the broadcast over ``N`` is implicit.
+            * Boundary: ``(1 - dones[t])`` cuts both the bootstrap
+              (``values[t+1]``) and the GAE accumulator at episode ends.
+              Forgetting either term silently leaks reward across episodes.
+            * Iteration direction: must go backwards. A forward loop computes
+              the wrong recurrence and tests will FAIL with non-matching
+              advantages.
         """
 
-        # -- Solution code --
+        # -- YOUR CODE HERE --
         T = rewards.shape[0]
         advantages = torch.zeros_like(rewards)
         gae = torch.zeros_like(rewards[0])
@@ -103,7 +124,7 @@ class RolloutBuffer:
             gae = delta + gamma * lam * not_done * gae
             advantages[t] = gae
         return advantages
-        # -- END Solution code --
+        # -- END YOUR CODE --
 
     def compute_returns_and_advantages(
         self, last_value, gamma: float, gae_lambda: float
