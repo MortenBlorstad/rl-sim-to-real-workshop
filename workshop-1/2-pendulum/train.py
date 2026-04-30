@@ -31,7 +31,7 @@ warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
 _HERE = Path(__file__).resolve().parent
 _WORKSHOP1 = _HERE.parent
 sys.path.insert(0, str(_WORKSHOP1 / "1-ppo"))
-from ppo.utils import silence_objc_dup_class_warnings 
+from ppo.utils import silence_objc_dup_class_warnings
 silence_objc_dup_class_warnings()
 import gymnasium as gym
 from gymnasium.vector import AutoresetMode
