@@ -188,15 +188,10 @@ class PPOAgent:
               ``evaluate_actions`` during the update phase.
         """
         # -- YOUR CODE HERE --
-        mean = self.actor(obs)
-        dist = Normal(mean, self.log_std.exp())
-        if deterministic:
-            unclipped = mean
-        else:
-            unclipped = dist.sample()
-        log_prob = dist.log_prob(unclipped).sum(dim=-1)
-        action = unclipped.clamp(self.action_min, self.action_max)
-        return action, log_prob
+        raise NotImplementedError(
+            "TODO 2: sample an action from the policy and return (action, log_prob). "
+            "See docstring above for hints."
+        )
         # -- END YOUR CODE --
 
     ###==========================================================================
@@ -252,11 +247,10 @@ class PPOAgent:
             * ``self.log_std.exp()`` (same as TODO 2) — log-space parameter.
         """
         # -- YOUR CODE HERE --
-        mean = self.actor(obs)
-        dist = Normal(mean, self.log_std.exp())
-        log_probs = dist.log_prob(actions).sum(dim=-1)
-        entropy = dist.entropy().sum(dim=-1)
-        return log_probs, entropy
+        raise NotImplementedError(
+            "TODO 3: evaluate actions under the current policy. "
+            "See docstring above for hints."
+        )
         # -- END YOUR CODE --
 
 
@@ -318,10 +312,10 @@ class PPOAgent:
               Don't fold those into this function.
         """
         # -- YOUR CODE HERE --
-        ratio = (new_log_probs - old_log_probs).exp()
-        surr1 = ratio * advantages
-        surr2 = ratio.clamp(1.0 - clip_eps, 1.0 + clip_eps) * advantages
-        return -torch.min(surr1, surr2).mean()
+        raise NotImplementedError(
+            "TODO 4: compute the PPO clipped surrogate loss. "
+            "See docstring above for hints."
+        )
         # -- END YOUR CODE --
 
     # ===========================================================================
@@ -560,7 +554,10 @@ class PPOAgent:
             # ----- TODO 5a: compute returns and advantages -----
             # See docstring section "5a". One method call on `buffer`.
             # -- YOUR CODE HERE --
-            buffer.compute_returns_and_advantages(last_value, gamma, gae_lambda)
+            raise NotImplementedError(
+                "TODO 5a: compute returns and advantages on the buffer. "
+                "See docstring section 5a."
+            )
             # -- END YOUR CODE --
 
             # ----- update phase -----
@@ -585,16 +582,10 @@ class PPOAgent:
                     # The scaffold below handles zero_grad → backward →
                     # clip_grad_norm → optimizer.step. Just produce `loss`.
                     # -- YOUR CODE HERE --
-                    new_log_probs, entropy = self.evaluate_actions(
-                        batch["obs"], batch["actions"],
+                    raise NotImplementedError(
+                        "TODO 5b: compose the combined PPO loss from the components. "
+                        "See docstring section 5b."
                     )
-                    pred_values = self.critic(batch["obs"])
-
-                    p_loss = self.ppo_loss(
-                        new_log_probs, batch["old_log_probs"], batch["advantages"], clip_eps,
-                    )
-                    v_loss = F.mse_loss(pred_values, batch["returns"])
-                    loss = p_loss + value_coef * v_loss - entropy_coef * entropy.mean()
                     # -- END YOUR CODE --
 
                     optimizer.zero_grad()
@@ -627,7 +618,10 @@ class PPOAgent:
             # ----- TODO 5c: reset rollout buffer for the next update -----
             # See docstring section "5c". One method call on `buffer`.
             # -- YOUR CODE HERE --
-            buffer.reset()
+            raise NotImplementedError(
+                "TODO 5c: reset the rollout buffer for the next update. "
+                "See docstring section 5c."
+            )
             # -- END YOUR CODE --
 
             final_stats = {

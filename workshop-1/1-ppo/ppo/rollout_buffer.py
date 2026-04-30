@@ -115,15 +115,10 @@ class RolloutBuffer:
         """
 
         # -- YOUR CODE HERE --
-        T = rewards.shape[0]
-        advantages = torch.zeros_like(rewards)
-        gae = torch.zeros_like(rewards[0])
-        for t in reversed(range(T)):
-            not_done = 1.0 - dones[t]
-            delta = rewards[t] + gamma * values[t + 1] * not_done - values[t]
-            gae = delta + gamma * lam * not_done * gae
-            advantages[t] = gae
-        return advantages
+        raise NotImplementedError(
+            "TODO 1: compute Generalized Advantage Estimation. "
+            "See docstring above for hints."
+        )
         # -- END YOUR CODE --
 
     def compute_returns_and_advantages(
