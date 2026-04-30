@@ -6,7 +6,13 @@ from ._eval import record_eval_episode
 from ._log_parser import make_log_fn, parse_update_line
 from ._runlog import RunDirectoryExistsError, RunLogger
 from ._sb3_jsonl_callback import Sb3JsonlCallback
-from .utils import DeviceUnavailableError, format_update_line, get_device, seed_everything
+from .utils import (
+    DeviceUnavailableError,
+    format_update_line,
+    get_device,
+    seed_everything,
+    silence_objc_dup_class_warnings,
+)
 
 __all__ = [
     "DeviceUnavailableError",
@@ -19,4 +25,5 @@ __all__ = [
     "RunLogger",
     "Sb3JsonlCallback",
     "seed_everything",
+    "silence_objc_dup_class_warnings",
 ]

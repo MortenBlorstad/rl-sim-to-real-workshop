@@ -14,6 +14,57 @@ def seed_everything(seed: int) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
 
+
+# ---------------------------------------------------------------------------
+# Helper — silence macOS objc duplicate-class warnings on stderr
+# ---------------------------------------------------------------------------
+
+def silence_objc_dup_class_warnings() -> None:
+    """Drop ``objc[PID]: Class ... is implemented in both ...`` lines from stderr.
+
+    Emitted by the macOS Objective-C runtime when two dylibs (cv2's bundled
+    libSDL2 and pygame's libSDL2) register the same classes. They are written
+    directly to fd 2, so ``warnings.filterwarnings`` cannot catch them.
+
+    Replaces fd 2 with a pipe and runs a daemon thread that forwards every
+    line back to the original stderr, except lines starting with ``objc[``.
+    No-op on non-macOS. Idempotent. Must be called before pygame/cv2 dylibs
+    load (i.e. before ``import gymnasium`` in scripts that build CarRacing).
+    """
+    import sys
+    if sys.platform != "darwin":
+        return
+    if getattr(silence_objc_dup_class_warnings, "_installed", False):
+        return
+    import os
+    import threading
+
+    real_fd = os.dup(2)
+    r, w = os.pipe()
+    os.dup2(w, 2)
+    os.close(w)
+
+    def _pump() -> None:
+        buf = b""
+        while True:
+            try:
+                chunk = os.read(r, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                if not line.startswith(b"objc["):
+                    os.write(real_fd, line + b"\n")
+        if buf and not buf.startswith(b"objc["):
+            os.write(real_fd, buf)
+
+    threading.Thread(target=_pump, daemon=True).start()
+    silence_objc_dup_class_warnings._installed = True  # type: ignore[attr-defined]
+
+
 # ---------------------------------------------------------------------------
 # Helper — log line formatter
 # ---------------------------------------------------------------------------
@@ -31,7 +82,7 @@ def format_update_line(
 ) -> str:
     """Format one fixed-width log line for the training loop.
 
-    Use this inside your TODO 5 ``train()`` implementation so the script-mode
+    Used inside your ``train()`` implementation so the script-mode
     runner can parse the loss values for its exit checks.
     """
     return (
@@ -70,7 +121,7 @@ def _available_devices() -> list[str]:
     return devices
 
 
-def get_device() -> torch.device:
+def get_device(device: str = "auto") -> torch.device:
     """Resolve the active device per the workshop's policy.
 
     Reads ``RL_WORKSHOP_DEVICE`` from the process environment. Allowed values:
@@ -86,9 +137,8 @@ def get_device() -> torch.device:
     Raises ``DeviceUnavailableError`` when the requested device is
     unavailable or the env-var value is unrecognised.
     """
-    raw = os.environ.get(_DEVICE_ENV_VAR, "auto")
+    raw = os.environ.get(_DEVICE_ENV_VAR, device)
     requested = raw.strip().lower()
-
     if requested not in _ALLOWED_VALUES:
         raise DeviceUnavailableError(
             f"{_DEVICE_ENV_VAR}={raw!r} is not a recognised value. "

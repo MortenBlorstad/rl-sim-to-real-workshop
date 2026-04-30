@@ -13,20 +13,13 @@ import numpy as np
 
 
 def record_eval_episode(
-    env_id: str,
-    agent_predict_fn: Callable[..., np.ndarray],
-    run_dir: Path,
-    *,
-    max_steps: int = 1000,
-    seed: int = 0,
-    reset_preprocess_state_fn: Optional[Callable[[], None]] = None,
-    wrappers: Optional[list] = None,
+    env, predict_fn, run_dir, max_steps=1000, seed=0
 ) -> Path:
     """Run one greedy episode and write ``<run_dir>/eval.mp4``.
 
     Args:
-        env_id: gymnasium env id; constructed with ``render_mode="rgb_array"``.
-        agent_predict_fn: callable ``(obs, deterministic=True) -> action``.
+        env: gymnasium env; constructed with ``render_mode="rgb_array"``.
+        predict_fn: callable ``(obs, deterministic=True) -> action``.
             For PPOAgent: pass ``agent.predict``. For SB3: pass a closure that
             calls ``model.predict(obs, deterministic=True)`` and returns the
             action.
@@ -41,39 +34,17 @@ def record_eval_episode(
     Returns:
         Path to ``eval.mp4`` on success, or ``eval.mp4.skipped`` on failure.
     """
+    import gymnasium as gym
+    from gymnasium.wrappers import RecordVideo
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     skipped_path = run_dir / "eval.mp4.skipped"
 
-    
-    import gymnasium as gym
-    from gymnasium.wrappers import RecordVideo
-
-
-    
-    env = gym.make(env_id, render_mode="rgb_array")
-    if wrappers:
-        for w in wrappers:
-            env = w(env)
-    env = RecordVideo(
-        env,
-        video_folder=str(run_dir),
-        name_prefix="eval",
-        episode_trigger=lambda ep_idx: True,
-        disable_logger=True,
-    )
-    
-
-    if reset_preprocess_state_fn is not None:
-        
-        reset_preprocess_state_fn()
-        
-
-    
+    env = RecordVideo(env, str(run_dir), name_prefix="eval",
+                      episode_trigger=lambda _: True, disable_logger=True)
     obs, _ = env.reset(seed=seed)
     for _ in range(max_steps):
-        action = agent_predict_fn(obs, deterministic=False)
-        action = np.asarray(action, dtype=np.float32)
+        action = np.asarray(predict_fn(obs, deterministic=True), dtype=np.float32)
         obs, _, terminated, truncated, _ = env.step(action)
         if terminated or truncated:
             break

@@ -3,25 +3,26 @@ name = "rl-sim-to-real-workshop"
 version = "0.1.0"
 description = "Reinforcement Learning Workshop: Sim-to-Real with PiRacer Pro"
 requires-python = ">=3.10,<3.13"
-dependencies = []
+dependencies = [
+    "opencv-python-headless>=4.13.0.92",
+]
 
 [dependency-groups]
 workshop1 = [
     "gymnasium[all]>=0.29",
     "torch>=2.1",
     "numpy",
-    "opencv-python",
     "matplotlib",
     "stable-baselines3",
     "huggingface-hub>=0.20",
     "tensorboard",
     "imageio[ffmpeg]>=2.31",
+    "huggingface-sb3",
 ]
 workshop2 = [
     "gym-donkeycar",
     "stable-baselines3",
     "torch",
     "numpy",
-    "opencv-python",
     "Pillow",
 ]

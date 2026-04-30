@@ -26,13 +26,16 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-
-import gymnasium as gym
-from gymnasium.vector import AutoresetMode
-
+import warnings
+warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
 _HERE = Path(__file__).resolve().parent
 _WORKSHOP1 = _HERE.parent
 sys.path.insert(0, str(_WORKSHOP1 / "1-ppo"))
+from ppo.utils import silence_objc_dup_class_warnings 
+silence_objc_dup_class_warnings()
+import gymnasium as gym
+from gymnasium.vector import AutoresetMode
+
 
 from ppo import PPOAgent
 from ppo.utils import (
@@ -64,16 +67,9 @@ hyperparameters: dict = {
 }
 
 
-class ObsToState(gym.ObservationWrapper):
-    
-
-    def __init__(self, env: gym.Env):
-        super().__init__(env)
-        self.obs_low = self.observation_space.low
-        self.obs_high = self.observation_space.high
-
-    def observation(self, obs):
-        return obs
+def obs_to_state(env: gym.Env) -> gym.Env:
+    """Example env wrapper chain. For Pendulum-v1, no wrappers are actually needed."""
+    return env
 
 
 def main() -> int:
@@ -93,65 +89,45 @@ def main() -> int:
         ENV_ID,
         num_envs=NUM_ENVS,
         vectorization_mode="sync",
-        wrappers=[ObsToState],
+        wrappers=[obs_to_state],
         vector_kwargs={"autoreset_mode": AutoresetMode.SAME_STEP},
     )
-    agent = PPOAgent(env, hyperparameters=hyperparameters)
+    agent = PPOAgent(env, hyperparameters=hyperparameters, device="cpu")
 
     runs_root = _WORKSHOP1.parent / "runs"
-    try:
-        runlog = RunLogger(
-            stage=STAGE,
-            hyperparameters=hyperparameters,
-            env_id=ENV_ID,
-            agent_class=type(agent).__name__,
-            seed=seed,
+    
+    runlog = RunLogger(
+        stage=STAGE,
+        hyperparameters=hyperparameters,
+        env_id=ENV_ID,
+        agent_class=type(agent).__name__,
+        seed=seed,
+        total_timesteps=args.timesteps,
+        run_name=args.run_name,
+        force=args.force,
+        runs_root=runs_root,
+    )
+   
+    with runlog:
+        log_fn = make_log_fn(runlog, agent)
+        agent.train(
+            env,
             total_timesteps=args.timesteps,
-            run_name=args.run_name,
-            force=args.force,
-            runs_root=runs_root,
+            random_state=seed,
+            log_fn=log_fn,
         )
-    except RunDirectoryExistsError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        env.close()
-        return 1
-
-    exit_code = 0
-    try:
-        with runlog:
-            log_fn = make_log_fn(runlog, agent)
-            agent.train(
+        agent.save(str(runlog.run_dir / "model.pt"))
+        if not args.no_eval:
+            agent.evaluate(
                 env,
-                total_timesteps=args.timesteps,
-                random_state=seed,
-                log_fn=log_fn,
-            )
-            agent.save(str(runlog.run_dir / "model.pt"))
-            if not args.no_eval:
-                agent.evaluate(
-                    env,
-                    n_episodes=1,
-                    record_video=True,
-                    video_dir=runlog.run_dir,
+                n_episodes=1,
+                record_video=True,
+                video_dir=runlog.run_dir,
                 )
-    except KeyboardInterrupt:
-        print("\n[train] interrupted by user", file=sys.stderr)
-        exit_code = 130
-    except NotImplementedError as exc:
-        print(
-            "[train] Looks like a TODO is still raising NotImplementedError. "
-            "Fill it in and re-run.",
-            file=sys.stderr,
-        )
-        print(f"[train] underlying error: {exc}", file=sys.stderr)
-        exit_code = 3
-    except Exception as exc:
-        print(f"[train] error: {exc!r}", file=sys.stderr)
-        exit_code = 2
-    finally:
-        env.close()
+    
+    env.close()
 
-    return exit_code
+    return 0
 
 
 if __name__ == "__main__":

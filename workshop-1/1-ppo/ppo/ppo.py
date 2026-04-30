@@ -57,12 +57,13 @@ class PPOAgent:
         self,
         env: gym.Env,
         hyperparameters: dict | None = None,
+        device: str = "auto",
     ):
         self.env = env
         self.hyperparameters = dict(self.DEFAULT_HYPERPARAMS)
         if hyperparameters:
             self.hyperparameters.update(hyperparameters)
-        self.device = get_device()
+        self.device = get_device(device)
         seed_everything(self.hyperparameters.get("random_state", DEFAULT_SEED))
 
         # The agent reads obs/action shapes from the *single* env spaces so

@@ -4,26 +4,24 @@ The constitutional escape hatch for stage 3 (Article VI). Builds a 4-env
 SyncVectorEnv with the canonical ``Grayscale → Resize(84, 84) → FrameStack(4)``
 wrapper chain, trains SB3's ``PPO("CnnPolicy", ...)``, writes the canonical
 run directory under ``runs/car-racing/<run-name>/``.
-
-Optional ``--hf-repo``: download a pretrained checkpoint from HuggingFace Hub,
-initialise SB3's PPO from those weights, and continue training (fine-tune)
-for ``--timesteps`` steps before evaluating. See
-``specs/005-carracing-drivers/contracts/cli.md`` for full flag documentation.
-
-Usage::
-
-    # From-scratch
-    uv run python workshop-1/3-car-racing/train_sb3.py --timesteps 10000 --run-name smoke --force
-
-    # Fine-tune from HuggingFace
-    uv run python workshop-1/3-car-racing/train_sb3.py \
-        --hf-repo sb3/ppo-CarRacing-v0 --timesteps 10000 --run-name finetune --force
 """
-from __future__ import annotations
 
+#### imports ###############
+from __future__ import annotations
+from dataclasses import dataclass
 import argparse
 import sys
+import warnings
 from pathlib import Path
+warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
+
+_HERE = Path(__file__).resolve().parent
+_WORKSHOP1 = _HERE.parent
+sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(_WORKSHOP1 / "1-ppo"))
+
+from ppo.utils import silence_objc_dup_class_warnings
+silence_objc_dup_class_warnings()
 
 import gymnasium as gym
 from gymnasium.wrappers import (
@@ -32,12 +30,8 @@ from gymnasium.wrappers import (
     ResizeObservation,
 )
 
-_HERE = Path(__file__).resolve().parent
-_WORKSHOP1 = _HERE.parent
-sys.path.insert(0, str(_HERE))
-sys.path.insert(0, str(_WORKSHOP1 / "1-ppo"))
 
-from ppo.utils import (  # noqa: E402
+from ppo.utils import (  
     RunDirectoryExistsError,
     RunLogger,
     Sb3JsonlCallback,
@@ -45,28 +39,86 @@ from ppo.utils import (  # noqa: E402
     record_eval_episode,
 )
 
-from stable_baselines3 import PPO  # noqa: E402
-from stable_baselines3.common.env_util import make_vec_env  # noqa: E402
-from stable_baselines3.common.vec_env import VecFrameStack  # noqa: E402
+from stable_baselines3 import PPO  
+from stable_baselines3.common.env_util import make_vec_env 
+from stable_baselines3.common.vec_env import VecFrameStack  
+import numpy as np
+###############
 
-DEFAULT_TIMESTEPS = 200_000
+
+DEFAULT_TIMESTEPS = 100
 DEFAULT_SEED = 42
 ENV_ID = "CarRacing-v3"
 STAGE = "car-racing"
 NUM_ENVS = 4
 
 
-def _make_carracing_base(**kwargs) -> gym.Env:
-    """Per-env factory used by SB3's make_vec_env. Applies the per-env half
-    of the wrapper chain (grayscale + resize, channel-last HWC). The frame
-    stack is added on the vec side via VecFrameStack."""
+class FrameSkip(gym.Wrapper):
+    def __init__(self, env, skip=2):
+        super().__init__(env)
+        self._skip = skip
+
+    def step(self, action):
+        total_reward = 0.0
+        for _ in range(self._skip):
+            obs, reward, terminated, truncated, info = self.env.step(action)
+            total_reward += reward
+            if terminated or truncated:
+                break
+        return obs, total_reward, terminated, truncated, info
+
+def make_env(resize=64, frame_skip=None, **kwargs) -> gym.Env:
+    """Per-env factory. Wrapper chain is configurable to match HuggingFace checkpoint."""
     env = gym.make(ENV_ID, **kwargs)
-    # Resize first (on RGB), then grayscale. The reverse order trips
-    # ResizeObservation on Gymnasium 1.x because cv2 collapses the channel
-    # dim when resizing a (H, W, 1) array.
-    env = ResizeObservation(env, (84, 84))
+    if frame_skip is not None:
+        env = FrameSkip(env, skip=frame_skip)
+    env = ResizeObservation(env, (resize, resize))
     env = GrayscaleObservation(env, keep_dim=True)
     return env
+
+
+
+
+
+@dataclass
+class EnvConfig:
+    env_id: str = "CarRacing-v3"
+    resize: int = 64
+    frame_skip: int | None = None
+    n_stack: int = 2
+    n_envs: int = 4
+
+    # Presets
+    @classmethod
+    def fresh(cls) -> "EnvConfig":
+        return cls()
+
+    @classmethod
+    def hub(cls) -> "EnvConfig":
+        """Match sb3/ppo-CarRacing-v0 checkpoint."""
+        return cls(resize=64, frame_skip=2, n_stack=2)
+
+    def make_single(self, **kwargs) -> gym.Env:
+        env = gym.make(self.env_id, **kwargs)
+        if self.frame_skip is not None:
+            env = FrameSkip(env, skip=self.frame_skip)
+        env = ResizeObservation(env, (self.resize, self.resize))
+        env = GrayscaleObservation(env, keep_dim=True)
+        return env
+
+    def make_train(self, seed: int = 0):
+        env = make_vec_env(self.make_single, n_envs=self.n_envs, seed=seed)
+        return VecFrameStack(env, n_stack=self.n_stack, channels_order="last")
+
+    def make_eval(self, seed: int = 0) -> gym.Env:
+        env = gym.make(self.env_id, render_mode="rgb_array")
+        if self.frame_skip is not None:
+            env = FrameSkip(env, skip=self.frame_skip)
+        env = ResizeObservation(env, (self.resize, self.resize))
+        env = GrayscaleObservation(env, keep_dim=False)
+        env = FrameStackObservation(env, self.n_stack)
+        return env
+
 
 
 def main() -> int:
@@ -76,144 +128,104 @@ def main() -> int:
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--no-eval", action="store_true")
     parser.add_argument("--force", action="store_true")
-    parser.add_argument(
-        "--hf-repo",
-        type=str,
-        default=None,
-        help="HuggingFace repo id (e.g. 'sb3/ppo-CarRacing-v0'). When set, "
-        "fine-tune from this checkpoint instead of training from scratch.",
-    )
-    parser.add_argument(
-        "--hf-filename",
-        type=str,
-        default=None,
-        help="Filename within the HF repo. Defaults to '<basename(repo_id)>.zip'. "
-        "Requires --hf-repo.",
-    )
+    parser.add_argument("--from-hub", action="store_true",
+                    help="Load pretrained weights from HuggingFace sb3/ppo-CarRacing-v0")
+    parser.add_argument("--eval-only", action="store_true",
+                    help="Skip training, only run evaluation (useful with --from-hub)")
     args = parser.parse_args()
 
-    if args.hf_filename and not args.hf_repo:
-        parser.error("--hf-filename requires --hf-repo")
+    
 
-    env = make_vec_env(
-        _make_carracing_base,
-        n_envs=NUM_ENVS,
-        seed=args.seed,
-    )
-    env = VecFrameStack(env, n_stack=4, channels_order="last")
-
+    
+    cfg = EnvConfig.hub() if args.from_hub else EnvConfig.fresh()
+    env = cfg.make_train(seed=args.seed)
     device = str(get_device())
-    resolved_filename = args.hf_filename
-    if args.hf_repo is not None:
-        from _huggingface import (  # noqa: E402  (sibling-of-driver import)
-            HuggingFaceLoadError,
-            _default_filename,
-            download_pretrained,
-        )
 
-        resolved_filename = args.hf_filename or _default_filename(args.hf_repo)
-        try:
-            local_path = download_pretrained(args.hf_repo, resolved_filename)
-        except HuggingFaceLoadError as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            env.close()
-            return 1
-        try:
-            model = PPO.load(local_path, env=env, device=device)
-        except (RuntimeError, ValueError, ModuleNotFoundError, ImportError) as exc:
-            print(
-                f"Error: HuggingFace checkpoint {args.hf_repo!r}/{resolved_filename!r} "
-                f"could not be loaded into the local SB3 PPO config.\n"
-                f"Underlying error: {type(exc).__name__}: {exc}\n"
-                f"\n"
-                f"Common causes:\n"
-                f"  - Architecture/hyperparameter mismatch (different network width or n_steps).\n"
-                f"  - Old SB3 v1.x checkpoint that references the legacy 'gym' module\n"
-                f"    instead of 'gymnasium'. Pick a checkpoint trained with SB3 >= 2.0.\n"
-                f"\n"
-                f"Try a different repo, or fall back to from-scratch training "
-                f"(omit --hf-repo).",
-                file=sys.stderr,
-            )
-            env.close()
-            return 1
-        agent_class = "sb3.PPO[CnnPolicy]+hf-finetune"
+    if args.from_hub:
+        from huggingface_sb3 import load_from_hub
+        sys.modules["gym"] = gym 
+
+        checkpoint = load_from_hub(
+            repo_id="sb3/ppo-CarRacing-v0",
+            filename="ppo-CarRacing-v0.zip",
+        )
+        obs_space_chw = gym.spaces.Box(
+            low=0, high=255,
+            shape=(cfg.n_stack, cfg.resize, cfg.resize),
+            dtype=np.uint8,
+        )
+        model = PPO.load(
+            checkpoint,
+            env=env,
+            custom_objects={
+                "observation_space": obs_space_chw,
+                "action_space": env.action_space,
+                "learning_rate": 1e-4,
+                "lr_schedule": lambda _: 1e-4,
+                "clip_range": 0.2,
+                "use_sde": True,
+                "sde_sample_freq": 4,
+            },
+            device=device,
+            tensorboard_log=None,
+        )
+        
+        
+        print("Loaded pretrained weights from sb3/ppo-CarRacing-v0")
     else:
         model = PPO(
             "CnnPolicy",
             env,
             seed=args.seed,
             device=device,
-            verbose=0,
+            verbose=1,
         )
-        agent_class = "sb3.PPO[CnnPolicy]"
+   
 
     runs_root = _WORKSHOP1.parent / "runs"
-    try:
-        runlog = RunLogger(
-            stage=STAGE,
-            hyperparameters={
-                "lr": float(model.lr_schedule(1.0)),
-                "n_steps": int(model.n_steps),
-                "batch_size": int(model.batch_size),
-                "n_epochs": int(model.n_epochs),
-                "gamma": float(model.gamma),
-                "gae_lambda": float(model.gae_lambda),
-                "clip_range": float(model.clip_range(1.0)),
-            },
-            env_id=ENV_ID,
-            agent_class=agent_class,
-            seed=args.seed,
-            total_timesteps=args.timesteps,
-            run_name=args.run_name,
-            force=args.force,
-            runs_root=runs_root,
-            network_arch="cnn",
-            hf_repo_id=args.hf_repo,        # None for from-scratch
-            hf_filename=resolved_filename,   # auto-derived when only --hf-repo is set
-        )
-    except RunDirectoryExistsError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        env.close()
-        return 1
-
-    exit_code = 0
-    try:
-        with runlog:
+    
+    runlog = RunLogger(
+        stage=STAGE,
+        hyperparameters={
+            "lr": float(model.lr_schedule(1.0)),
+            "n_steps": int(model.n_steps),
+            "batch_size": int(model.batch_size),
+            "n_epochs": int(model.n_epochs),
+            "gamma": float(model.gamma),
+            "gae_lambda": float(model.gae_lambda),
+            "clip_range": float(model.clip_range(1.0)),
+            
+        },
+        env_id=ENV_ID,
+        agent_class="sb3.PPO[CnnPolicy]",
+        seed=args.seed,
+        total_timesteps=args.timesteps,
+        run_name=args.run_name,
+        force=args.force,
+        runs_root=runs_root,
+        network_arch="cnn",
+    )
+    
+    
+    with runlog:
+        if not args.eval_only:
             callback = Sb3JsonlCallback(runlog)
             model.learn(total_timesteps=args.timesteps, callback=callback)
-            model.save(str(runlog.run_dir / "model.zip"))
-            if not args.no_eval:
-                def predict_fn(obs, deterministic=True):
-                    action, _ = model.predict(obs, deterministic=deterministic)
-                    return action
+        model.save(str(runlog.run_dir / "model.zip"))
+        if not args.no_eval:
+            def predict_fn(obs, deterministic=True):
+                action, _ = model.predict(obs, deterministic=deterministic)
+                return action
+            record_eval_episode(
+                cfg.make_eval(args.seed),
+                predict_fn,
+                runlog.run_dir,
+                seed=args.seed,
+            )
+   
+    env.close()
 
-                # Eval env: keep_dim=False so grayscale gives (H, W) 2D,
-                # then FrameStackObservation gives (4, H, W) CHW which is
-                # the shape SB3's policy expects (channels-first after the
-                # internal VecTransposeImage during training).
-                eval_wrappers = [
-                    lambda e: ResizeObservation(e, (84, 84)),
-                    lambda e: GrayscaleObservation(e, keep_dim=False),
-                    lambda e: FrameStackObservation(e, 4),
-                ]
-                record_eval_episode(
-                    ENV_ID,
-                    predict_fn,
-                    runlog.run_dir,
-                    seed=args.seed,
-                    wrappers=eval_wrappers,
-                )
-    except KeyboardInterrupt:
-        print("\n[train_sb3] interrupted by user", file=sys.stderr)
-        exit_code = 130
-    except Exception as exc:
-        print(f"[train_sb3] error: {exc!r}", file=sys.stderr)
-        exit_code = 2
-    finally:
-        env.close()
-
-    return exit_code
+    return 0
 
 
 if __name__ == "__main__":
