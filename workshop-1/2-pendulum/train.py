@@ -1,25 +1,11 @@
 """MountainCarContinuous-v0 — custom-PPO training driver.
 
-Writes ``runs/mountaincar/<run-name>/{meta.json, metrics.jsonl, model.pt,
-eval.mp4}``.
-
-Thin wrapper around the stage-1 ``PPOAgent.train()`` and ``PPOAgent.evaluate()``:
-
-  1. Build env (with the ``NormalizeObs`` driver-level wrapper) and agent.
-  2. Open a ``RunLogger`` (writes meta.json, opens metrics.jsonl).
-  3. Call ``agent.train(...)`` with a ``log_fn`` that parses each formatted
-     log line into a JSONL record via the RunLogger.
-  4. ``agent.save(<run-dir>/model.pt)``.
-  5. Unless ``--no-eval``: ``agent.evaluate(env, n_episodes=1, record_video=True,
-     video_dir=<run-dir>)`` → ``eval.mp4``.
-
 Usage::
 
     uv run python workshop-1/2-mountaincar/train.py
-    uv run python workshop-1/2-mountaincar/train.py --timesteps 4096 --run-name smoke --force
+    uv run python workshop-1/2-mountaincar/train.py --timesteps 4096
 
 The seed is configured in source via ``hyperparameters["random_state"]``;
-there is intentionally no ``--seed`` CLI flag.
 """
 from __future__ import annotations
 

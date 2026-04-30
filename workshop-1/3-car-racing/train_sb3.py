@@ -1,9 +1,5 @@
-"""CarRacing-v3 — Stable-Baselines3 alternative training driver.
-
-The constitutional escape hatch for stage 3 (Article VI). Builds a 4-env
-SyncVectorEnv with the canonical ``Grayscale → Resize(84, 84) → FrameStack(4)``
-wrapper chain, trains SB3's ``PPO("CnnPolicy", ...)``, writes the canonical
-run directory under ``runs/car-racing/<run-name>/``.
+"""
+CarRacing-v3 — Stable-Baselines3 alternative training driver.
 """
 
 #### imports ###############
